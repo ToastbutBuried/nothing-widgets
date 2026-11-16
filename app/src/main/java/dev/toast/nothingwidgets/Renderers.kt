@@ -113,7 +113,7 @@ object Renderers {
             val n = if (idle) 0 else Math.round(levels[c] * rows)
             for (row in 0 until rows) {
                 val on = row < n; val k = n - 1 - row
-                val b = if (bars) BAR_FADE[minOf(k, BAR_FADE.size - 1)] else maxOf(.2f, 1 - k * .17f)
+                val b = if (bars) BAR_FADE[k.coerceIn(0, BAR_FADE.size - 1)] else maxOf(.2f, 1 - k * .17f)
                 p.color = if (on) {
                     val a = (b * 255).toInt()
                     if (red) Color.argb(a, 255, 45, 45) else Color.argb(a, 255, 255, 255)
