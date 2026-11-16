@@ -34,6 +34,10 @@ class MainActivity : Activity() {
         })
 
         root.addView(preview, LinearLayout.LayoutParams(-1, 700))
+        root.addView(Switch(this).apply {
+            text = "Bars style"; typeface = tf; setTextColor(Renderers.WHITE); isChecked = Prefs.bars(this@MainActivity)
+            setOnCheckedChangeListener { _, v -> Prefs.setBars(this@MainActivity, v); preview.invalidate() }
+        })
         root.addView(tv("Sensitivity", 14f).apply { setPadding(0, 24, 0, 0) })
         root.addView(SeekBar(this).apply {
             max = 100; progress = ((Prefs.gain(this@MainActivity) - 0.5f) / 3.5f * 100).toInt()
@@ -69,7 +73,7 @@ class PreviewView(ctx: android.content.Context) : android.view.View(ctx) {
             lv[i] = (t * 0.6f * g).coerceIn(0f, 1f)
         }
         val s = minOf(width, height)
-        val bmp = Renderers.viz(s, s, lv, Prefs.red(context), false)
+        val bmp = Renderers.viz(s, s, lv, Prefs.red(context), false, Prefs.bars(context))
         c.drawBitmap(bmp, (width - s) / 2f, 0f, null)
         postInvalidateDelayed(50)
     }

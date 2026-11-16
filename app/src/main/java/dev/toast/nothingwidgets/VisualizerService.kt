@@ -52,10 +52,15 @@ class VisualizerService : Service() {
             val ok = vis.getFft(fft) == android.media.audiofx.Visualizer.SUCCESS
             val tgt = if (ok) Fft.bandsFromFft(fft) else FloatArray(8)
             val gain = Prefs.gain(this)
-            for (c in 0 until 8) levels[c] += ((tgt[c] * gain).coerceIn(0f, 1f) - levels[c]) * .35f
+            val bars = Prefs.bars(this)
+            for (c in 0 until 8) {
+                val t = (tgt[c] * gain).coerceIn(0f, 1f)
+                val k = if (bars) (if (t > levels[c]) .85f else .4f) else .35f
+                levels[c] += (t - levels[c]) * k
+            }
             val ids = mgr.getAppWidgetIds(ComponentName(this, VizWidgetProvider::class.java))
             if (ids.isEmpty()) { stopSelf(); break }
-            val bmp = Renderers.viz(360, 360, levels, Prefs.red(this), false)
+            val bmp = Renderers.viz(360, 360, levels, Prefs.red(this), false, bars)
             Renderers.push(this, bmp, ids, VizWidgetProvider.toggleIntent(this))
             Thread.sleep(66)
         }
@@ -75,7 +80,7 @@ class VisualizerService : Service() {
         val ids = mgr.getAppWidgetIds(ComponentName(this, VizWidgetProvider::class.java))
         for (id in ids) {
             val w = 360; val h = 360
-            Renderers.push(this, Renderers.viz(w, h, FloatArray(8), Prefs.red(this), !on), intArrayOf(id), VizWidgetProvider.toggleIntent(this))
+            Renderers.push(this, Renderers.viz(w, h, FloatArray(8), Prefs.red(this), !on, Prefs.bars(this)), intArrayOf(id), VizWidgetProvider.toggleIntent(this))
         }
     }
 

@@ -8,6 +8,8 @@ object Renderers {
     const val RED = 0xFFFF2D2D.toInt()
     const val WHITE = 0xFFF2F2F2.toInt()
     const val DIM = 0xFF5A5A5A.toInt()
+    /** top dot of a column is brightest; steep trail below (measured from the reference widget) */
+    private val BAR_FADE = floatArrayOf(1f, .76f, .46f, .24f, .14f)
 
     private fun tf(c: Context, res: Int) = c.resources.getFont(res)
 
@@ -96,10 +98,10 @@ object Renderers {
         return bmp
     }
 
-    fun viz(w: Int, h: Int, levels: FloatArray, red: Boolean, idle: Boolean): Bitmap {
+    fun viz(w: Int, h: Int, levels: FloatArray, red: Boolean, idle: Boolean, bars: Boolean = false): Bitmap {
         val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         val cv = Canvas(bmp)
-        val card = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFF1B1B1B.toInt() }
+        val card = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = if (bars) 0xFF19191A.toInt() else 0xFF1B1B1B.toInt() }
         val r = minOf(w, h) * 0.12f
         cv.drawRoundRect(0f, 0f, w.toFloat(), h.toFloat(), r, r, card)
         val cols = 8; val rows = 8
@@ -111,11 +113,11 @@ object Renderers {
             val n = if (idle) 0 else Math.round(levels[c] * rows)
             for (row in 0 until rows) {
                 val on = row < n; val k = n - 1 - row
-                val b = maxOf(.2f, 1 - k * .17f)
+                val b = if (bars) BAR_FADE[minOf(k, BAR_FADE.size - 1)] else maxOf(.2f, 1 - k * .17f)
                 p.color = if (on) {
                     val a = (b * 255).toInt()
                     if (red) Color.argb(a, 255, 45, 45) else Color.argb(a, 255, 255, 255)
-                } else 0xFF262626.toInt()
+                } else if (bars) 0xFF232325.toInt() else 0xFF262626.toInt()
                 cv.drawCircle(pad + cw * (c + .5f), h - pad - rh * (row + .5f), rad, p)
             }
         }
