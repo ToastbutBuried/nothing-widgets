@@ -31,7 +31,7 @@ object Renderers {
     }
 
     /** w,h in px; d = px per dp. Everything is laid out in dp so a bigger widget gets more lines, not just bigger text. */
-    fun lyrics(ctx: Context, w: Int, h: Int, d: Float, lines: List<LrcLine>, pos: Double, status: String?): Bitmap {
+    fun lyrics(ctx: Context, w: Int, h: Int, d: Float, lines: List<LrcLine>, pos: Double, status: String?, prev: Int = -2, t: Float = 1f): Bitmap {
         val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         val cv = Canvas(bmp)
         val card = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.BLACK }
@@ -60,41 +60,53 @@ object Renderers {
         // lyrics area
         val top = hy + 10 * d; val bottom = by - 12 * d
         val area = bottom - top; val maxW = w - 2 * pad
-        val i = LrcParser.index(lines, pos)
-        if (lines.isEmpty() || i < 0 && lines.isEmpty()) {
+        val idx = LrcParser.index(lines, pos)
+        if (lines.isEmpty()) {
             p.typeface = bold; p.textSize = 20 * d; p.color = WHITE
             cv.drawText(ell(status ?: "NO LYRICS", p, maxW), pad, (top + bottom) / 2 + 7 * d, p)
             return bmp
         }
-        val cur = if (i >= 0) lines[i].s.ifEmpty { "♪" } else "♪"
-        // largest current-line size that wraps into at most maxLines lines within ~60% of the area
-        p.typeface = bold
-        val maxLines = if (area > 150 * d) 4 else if (area > 90 * d) 3 else 2
-        var size = minOf(30f, maxOf(14f, area / d * 0.16f))
-        var wrapped: List<String>
-        while (true) {
-            p.textSize = size * d
-            wrapped = wrap(p, cur, maxW - 14 * d)
-            if ((wrapped.size <= maxLines && wrapped.size * size * 1.2f * d <= area * .7f) || size <= 11f) break
-            size -= 1f
+        fun block(i: Int, dy: Float, alpha: Int) {
+            val sc = cv.saveLayerAlpha(0f, top - 6 * d, w.toFloat(), bottom + 6 * d, alpha)
+            cv.clipRect(0f, top - 6 * d, w.toFloat(), bottom + 6 * d)
+            cv.translate(0f, dy)
+            val cur = if (i >= 0) lines[i].s.ifEmpty { "♪" } else "♪"
+            // largest current-line size that wraps into at most maxLines lines within ~60% of the area
+            p.typeface = bold
+            val maxLines = if (area > 150 * d) 4 else if (area > 90 * d) 3 else 2
+            var size = minOf(30f, maxOf(14f, area / d * 0.16f))
+            var wrapped: List<String>
+            while (true) {
+                p.textSize = size * d
+                wrapped = wrap(p, cur, maxW - 14 * d)
+                if ((wrapped.size <= maxLines && wrapped.size * size * 1.2f * d <= area * .7f) || size <= 11f) break
+                size -= 1f
+            }
+            val lh = size * 1.2f * d
+            val curH = wrapped.size * lh
+            val y0 = top + (area - curH) / 2
+            p.color = WHITE
+            wrapped.forEachIndexed { k, t -> cv.drawText(if (k == wrapped.lastIndex || true) ell(t, p, maxW - 14 * d) else t, pad + 14 * d, y0 + lh * k + size * d, p) }
+            val red = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = RED }
+            cv.drawCircle(pad + 4 * d, y0 + size * d * 0.6f, 3.5f * d, red)
+            // context lines, as many as fit
+            val csize = maxOf(10f, size * 0.55f)
+            p.typeface = reg; p.textSize = csize * d; p.color = DIM
+            val cl = csize * 1.7f * d
+            val fit = ((area - curH) / 2 / cl).toInt().coerceIn(0, 2)
+            for (off in 1..fit) {
+                val before = i - off; val after = i + off
+                if (before in lines.indices) cv.drawText(ell(lines[before].s.ifEmpty { "♪" }, p, maxW), pad, y0 - cl * (off - 1) - csize * .5f * d, p)
+                if (after in lines.indices) cv.drawText(ell(lines[after].s.ifEmpty { "♪" }, p, maxW), pad, y0 + curH + cl * (off - 1) + csize * 1.1f * d, p)
+            }
+            cv.restoreToCount(sc)
         }
-        val lh = size * 1.2f * d
-        val curH = wrapped.size * lh
-        val y0 = top + (area - curH) / 2
-        p.color = WHITE
-        wrapped.forEachIndexed { k, t -> cv.drawText(if (k == wrapped.lastIndex || true) ell(t, p, maxW - 14 * d) else t, pad + 14 * d, y0 + lh * k + size * d, p) }
-        val red = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = RED }
-        cv.drawCircle(pad + 4 * d, y0 + size * d * 0.6f, 3.5f * d, red)
-        // context lines, as many as fit
-        val csize = maxOf(10f, size * 0.55f)
-        p.typeface = reg; p.textSize = csize * d; p.color = DIM
-        val cl = csize * 1.7f * d
-        val fit = ((area - curH) / 2 / cl).toInt().coerceIn(0, 2)
-        for (off in 1..fit) {
-            val before = i - off; val after = i + off
-            if (before in lines.indices) cv.drawText(ell(lines[before].s.ifEmpty { "♪" }, p, maxW), pad, y0 - cl * (off - 1) - csize * .5f * d, p)
-            if (after in lines.indices) cv.drawText(ell(lines[after].s.ifEmpty { "♪" }, p, maxW), pad, y0 + curH + cl * (off - 1) + csize * 1.1f * d, p)
-        }
+        if (t < 1f && prev != idx && prev >= -1) {
+            val e = 1f - (1f - t) * (1f - t) * (1f - t) // ease-out cubic
+            val sh = 16 * d
+            block(prev, -e * sh, ((1f - e) * 255).toInt())
+            block(idx, (1f - e) * sh, (e * 255).toInt())
+        } else block(idx, 0f, 255)
         return bmp
     }
 
@@ -110,11 +122,18 @@ object Renderers {
         val rad = minOf(cw, rh) * .38f
         val p = Paint(Paint.ANTI_ALIAS_FLAG)
         for (c in 0 until cols) {
-            val n = if (idle) 0 else Math.round(levels[c] * rows)
+            val lvl = if (idle) 0f else levels[c].coerceIn(0f, 1f)
+            val pos = lvl * rows                       // continuous height in dots
             for (row in 0 until rows) {
-                val on = row < n; val k = n - 1 - row
-                val b = if (bars) BAR_FADE[k.coerceIn(0, BAR_FADE.size - 1)] else maxOf(.2f, 1 - k * .17f)
-                p.color = if (on) {
+                val dist = pos - (row + 1)             // >=0: fully inside the bar, in (-1,0): partial top dot
+                val b = if (!bars) {
+                    val n = Math.round(pos); val k = n - 1 - row
+                    if (row < n) maxOf(.2f, 1 - k * .17f) else 0f
+                } else if (dist >= 0f) {
+                    val i0 = dist.toInt().coerceAtMost(BAR_FADE.size - 1); val i1 = minOf(i0 + 1, BAR_FADE.size - 1)
+                    BAR_FADE[i0] + (BAR_FADE[i1] - BAR_FADE[i0]) * (dist - i0).coerceIn(0f, 1f)
+                } else if (dist > -1f) (1 + dist) * BAR_FADE[0] else 0f
+                p.color = if (b > 0.02f) {
                     val a = (b * 255).toInt()
                     if (red) Color.argb(a, 255, 45, 45) else Color.argb(a, 255, 255, 255)
                 } else if (bars) 0xFF232325.toInt() else 0xFF262626.toInt()

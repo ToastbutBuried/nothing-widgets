@@ -16,7 +16,7 @@ class VizWidgetProvider : AppWidgetProvider() {
 
     private fun idle(ctx: Context, ids: IntArray) {
         for (id in ids) {
-            val w = 360; val h = 360
+            val w = VisualizerService.VIZ_PX; val h = VisualizerService.VIZ_PX
             Renderers.push(ctx, Renderers.viz(w, h, FloatArray(8), Prefs.red(ctx), true, Prefs.bars(ctx)), intArrayOf(id), toggleIntent(ctx))
         }
     }

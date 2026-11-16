@@ -45,24 +45,22 @@ class VisualizerService : Service() {
         } catch (e: Exception) { null }
         if (vis == null) { failed = true; stopSelf(); return }
         val fft = ByteArray(vis.captureSize)
-        val levels = FloatArray(8)
+        val cava = Cava()
         val mgr = AppWidgetManager.getInstance(this)
+        var last = SystemClock.elapsedRealtime()
         while (running) {
-            if (!screenOn) { Thread.sleep(250); continue }
+            if (!screenOn) { Thread.sleep(250); last = SystemClock.elapsedRealtime(); continue }
             val ok = vis.getFft(fft) == android.media.audiofx.Visualizer.SUCCESS
-            val tgt = if (ok) Fft.bandsFromFft(fft) else FloatArray(8)
-            val gain = Prefs.gain(this)
+            val now = SystemClock.elapsedRealtime()
+            val dt = ((now - last) / 1000f).coerceIn(0.005f, 0.2f); last = now
             val bars = Prefs.bars(this)
-            for (c in 0 until 8) {
-                val t = (tgt[c] * gain).coerceIn(0f, 1f)
-                val k = if (bars) (if (t > levels[c]) .85f else .4f) else .35f
-                levels[c] += (t - levels[c]) * k
-            }
+            val raw = if (ok) Fft.bandsFromFft(fft) else FloatArray(8)
+            val levels = if (bars) cava.process(raw, dt, Prefs.gain(this)) else FloatArray(8) { (raw[it] * Prefs.gain(this)).coerceIn(0f, 1f) }
             val ids = mgr.getAppWidgetIds(ComponentName(this, VizWidgetProvider::class.java))
             if (ids.isEmpty()) { stopSelf(); break }
-            val bmp = Renderers.viz(360, 360, levels, Prefs.red(this), false, bars)
-            Renderers.push(this, bmp, ids, VizWidgetProvider.toggleIntent(this))
-            Thread.sleep(66)
+            Renderers.push(this, Renderers.viz(VIZ_PX, VIZ_PX, levels, Prefs.red(this), false, bars), ids, VizWidgetProvider.toggleIntent(this))
+            val spent = SystemClock.elapsedRealtime() - now
+            if (spent < 33) Thread.sleep(33 - spent)   // ~30 fps cap
         }
         vis.enabled = false; vis.release()
     }
@@ -79,12 +77,13 @@ class VisualizerService : Service() {
         val mgr = AppWidgetManager.getInstance(this)
         val ids = mgr.getAppWidgetIds(ComponentName(this, VizWidgetProvider::class.java))
         for (id in ids) {
-            val w = 360; val h = 360
+            val w = VIZ_PX; val h = VIZ_PX
             Renderers.push(this, Renderers.viz(w, h, FloatArray(8), Prefs.red(this), !on, Prefs.bars(this)), intArrayOf(id), VizWidgetProvider.toggleIntent(this))
         }
     }
 
     companion object {
+        const val VIZ_PX = 260
         const val ACTION_STOP = "dev.toast.nothingwidgets.STOP"
         @Volatile var active = false
         @Volatile var failed = false

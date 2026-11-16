@@ -94,20 +94,40 @@ class MediaListenerService : NotificationListenerService() {
         return p / 1000.0
     }
 
+    private var shownIdx = -2
+    private var prevIdx = -2
+    private var animStart = 0L
+
     fun redraw() {
         main.removeCallbacks(tick)
         val mgr = AppWidgetManager.getInstance(this)
         val ids = mgr.getAppWidgetIds(ComponentName(this, LyricsWidgetProvider::class.java))
         if (ids.isEmpty() || !screenOn) return
         val pos = position()
+        val idx = LrcParser.index(lines, pos)
+        val now = SystemClock.elapsedRealtime()
+        if (idx != shownIdx) {
+            // animate only the normal forward step; jumps (seek, new track) snap
+            val step = shownIdx >= -1 && idx == shownIdx + 1
+            prevIdx = if (step) shownIdx else -2
+            animStart = now; shownIdx = idx
+        }
+        val t = ((now - animStart) / ANIM_MS.toFloat()).coerceIn(0f, 1f)
         for (id in ids) {
             val (w, h, d) = Renderers.sizePx(this, id, 250, 180)
-            Renderers.push(this, Renderers.lyrics(this, w, h, d, lines, pos, status), intArrayOf(id))
+            Renderers.push(this, Renderers.lyrics(this, w, h, d, lines, pos, status, prevIdx, t), intArrayOf(id))
         }
-        if (controller?.playbackState?.state == PlaybackState.STATE_PLAYING) main.postDelayed(tick, 1000)
+        if (controller?.playbackState?.state != PlaybackState.STATE_PLAYING) return
+        if (t < 1f) { main.postDelayed(tick, 40); return }
+        // wake exactly at the next line, otherwise once a second for the clock/progress bar
+        val speed = (controller?.playbackState?.playbackSpeed ?: 1f).coerceAtLeast(0.1f)
+        val nextT = lines.getOrNull(idx + 1)?.t
+        val untilNext = if (nextT != null) ((nextT - pos) * 1000 / speed).toLong() else 1000L
+        main.postDelayed(tick, untilNext.coerceIn(30L, 1000L))
     }
 
     companion object {
+        private const val ANIM_MS = 380L
         @Volatile var instance: MediaListenerService? = null
         fun nowPlaying(): String = instance?.trackKey?.replace("|", " – ") ?: ""
     }
