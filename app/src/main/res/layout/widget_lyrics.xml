@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Image of the whole widget + transparent tap zones for prev / play-pause / next.
+     Zone sizes must match Renderers.CTL_ZONE_DP / CTL_STRIP_DP / CTL_END_DP. -->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent" android:layout_height="match_parent">
+    <ImageView android:id="@+id/img" android:layout_width="match_parent" android:layout_height="match_parent"
+        android:scaleType="fitXY" />
+    <LinearLayout android:id="@+id/controls" android:layout_width="wrap_content" android:layout_height="40dp"
+        android:layout_gravity="bottom|end" android:layout_marginEnd="8dp" android:orientation="horizontal">
+        <FrameLayout android:id="@+id/btn_prev" android:layout_width="34dp" android:layout_height="match_parent" />
+        <FrameLayout android:id="@+id/btn_play" android:layout_width="34dp" android:layout_height="match_parent" />
+        <FrameLayout android:id="@+id/btn_next" android:layout_width="34dp" android:layout_height="match_parent" />
+    </LinearLayout>
+</FrameLayout>

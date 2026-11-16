@@ -162,13 +162,14 @@ class MainActivity : Activity() {
             s.refreshLyrics(); toast("Searching again…")
         }
         val pickBtn = pill("Pick lyrics", primary = true) { listFinds() }
+        val searchBtn = pill("Search manually") { manualSearch() }
         val resetBtn = pill("Reset") { latBar.progress = 100; setLatency(0) }
-        lyricControls = listOf(refreshBtn, pickBtn, minus, plus, resetBtn, latBar)
+        lyricControls = listOf(refreshBtn, pickBtn, searchBtn, minus, plus, resetBtn, latBar)
         add(card().apply {
             addView(header("Lyrics", lyrState)); addView(space(16))
             addView(text("NOW PLAYING", 10f, LABEL, dotoB).apply { letterSpacing = .18f }); addView(space(6))
             addView(trackTitle); addView(space(4)); addView(trackArtist); addView(space(16))
-            addView(row(refreshBtn, pickBtn)); addView(space(22))
+            addView(row(refreshBtn, pickBtn)); addView(space(8)); addView(searchBtn, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)); addView(space(22))
             addView(LinearLayout(context).apply {
                 orientation = LinearLayout.HORIZONTAL; gravity = Gravity.BOTTOM
                 addView(LinearLayout(context).apply {
@@ -187,6 +188,18 @@ class MainActivity : Activity() {
             addView(text("+ shows lyrics earlier, − later. Saved per song and reapplied when it plays again.", 11f, Renderers.DIM))
         })
 
+        // lyrics widget look
+        fun lyrChanged() { MediaListenerService.instance?.redraw() ?: LyricsWidgetProvider.draw(this,
+            AppWidgetManager.getInstance(this).getAppWidgetIds(ComponentName(this, LyricsWidgetProvider::class.java))) }
+        add(card().apply {
+            addView(label("Lyrics widget")); addView(space(16))
+            addView(sub("TEXT SIZE")); addView(segmented(listOf("S", "M", "L"), Prefs.lyrSize(context)) { Prefs.setLyrSize(context, it); lyrChanged() }); addView(space(14))
+            addView(sub("ACCENT")); addView(segmented(listOf("Red", "Mono"), if (Prefs.lyrRed(context)) 0 else 1) { Prefs.setLyrRed(context, it == 0); lyrChanged() }); addView(space(14))
+            addView(sub("CONTEXT LINES")); addView(segmented(listOf("On", "Off"), if (Prefs.lyrContext(context)) 0 else 1) { Prefs.setLyrContext(context, it == 0); lyrChanged() }); addView(space(14))
+            addView(sub("PLAYER BUTTONS")); addView(segmented(listOf("On", "Off"), if (Prefs.lyrControls(context)) 0 else 1) { Prefs.setLyrControls(context, it == 0); lyrChanged() }); addView(space(8))
+            addView(text("Tap the widget to open this screen; ⏮ ⏯ ⏭ sit bottom right. Word-by-word fill shows when LRCLIB has word timings.", 11f, Renderers.DIM))
+        })
+
         // visualizer
         vizState = text("", 11f, LABEL, dotoB)
         preview = PreviewView(this)
@@ -198,7 +211,10 @@ class MainActivity : Activity() {
             addView(text("STYLE", 10f, LABEL, dotoB).apply { letterSpacing = .18f }); addView(space(8))
             addView(segmented(listOf("Dots", "Bars"), if (Prefs.bars(context)) 1 else 0) { Prefs.setBars(context, it == 1); widgetsChanged() }); addView(space(14))
             addView(text("COLOUR", 10f, LABEL, dotoB).apply { letterSpacing = .18f }); addView(space(8))
-            addView(segmented(listOf("White", "Red"), if (Prefs.red(context)) 1 else 0) { Prefs.setRed(context, it == 1); widgetsChanged() }); addView(space(16))
+            addView(segmented(listOf("White", "Red"), if (Prefs.red(context)) 1 else 0) { Prefs.setRed(context, it == 1); widgetsChanged() }); addView(space(14))
+            addView(sub("BANDS")); val bandOpts = listOf(0, 8, 12, 16)
+            addView(segmented(listOf("Auto", "8", "12", "16"), bandOpts.indexOf(Prefs.bands(context)).coerceAtLeast(0)) { Prefs.setBands(context, bandOpts[it]); widgetsChanged() }); addView(space(14))
+            addView(sub("PEAK CAPS")); addView(segmented(listOf("On", "Off"), if (Prefs.peaks(context)) 0 else 1) { Prefs.setPeaks(context, it == 0); widgetsChanged() }); addView(space(16))
             addView(header("Sensitivity", sensValue)); addView(space(4))
             addView(slider(100, ((Prefs.gain(context) - 0.5f) / 3.5f * 100).toInt()) { p, _ ->
                 val g = 0.5f + p / 100f * 3.5f; Prefs.setGain(context, g); sensValue.text = "%.1f×".format(g)
@@ -208,7 +224,8 @@ class MainActivity : Activity() {
         sensValue.text = "%.1f×".format(Prefs.gain(this))
 
         // footer
-        add(text("Add the widgets: long-press the home screen › Widgets › Nothing Widgets. Lyrics resizes freely; the visualizer is 2×2, tap it to start or stop.",
+        val ver = try { packageManager.getPackageInfo(packageName, 0).versionName } catch (_: Exception) { "?" }
+        add(text("Add the widgets: long-press the home screen › Widgets › Nothing Widgets. Lyrics resizes freely; the visualizer is 2×2, tap it to start or stop. Both widgets resize.\n\nv$ver",
             11f, Renderers.DIM).apply { setPadding(dp(4), 0, dp(4), 0); setLineSpacing(0f, 1.3f) }, 0)
 
         setContentView(ScrollView(this).apply {
@@ -221,6 +238,8 @@ class MainActivity : Activity() {
         })
         if (intent.getBooleanExtra("viz", false)) toggleViz()
     }
+
+    private fun sub(t: String) = text(t, 10f, LABEL, dotoB).apply { letterSpacing = .18f; setPadding(0, 0, 0, dp(8)) }
 
     private fun permRow(name: String, sub: String, pill: TextView) = LinearLayout(this).apply {
         orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
@@ -250,15 +269,31 @@ class MainActivity : Activity() {
     private fun listFinds() {
         val s = svc() ?: return
         toast("Searching LRCLIB…")
-        s.findCandidates { list ->
-            when {
-                list == null -> toast("LRCLIB unreachable")
-                list.isEmpty() -> toast("No synced lyrics found")
-                else -> AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert).setTitle("Pick lyrics")
-                    .setItems(list.map { it.label() }.toTypedArray()) { _, i -> s.choose(list[i]); toast("Using: ${list[i].track}") }
-                    .setNegativeButton("Cancel", null).show()
-            }
+        s.findCandidates { showCandidates(s, it) }
+    }
+
+    private fun showCandidates(s: MediaListenerService, list: List<Candidate>?) {
+        when {
+            list == null -> toast("LRCLIB unreachable")
+            list.isEmpty() -> toast("No synced lyrics found")
+            else -> AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert).setTitle("Pick lyrics")
+                .setItems(list.map { it.label() }.toTypedArray()) { _, i -> s.choose(list[i]); toast("Using: ${list[i].track}") }
+                .setNegativeButton("Cancel", null).show()
         }
+    }
+
+    /** Type your own title/artist when the player's metadata is too messy to match. */
+    private fun manualSearch() {
+        val s = svc() ?: return
+        val (ct, ca) = TitleCleaner.clean(s.title(), s.artist())
+        fun field(hint: String, v: String) = EditText(this).apply { this.hint = hint; setText(v); setSingleLine(); setTextColor(Renderers.WHITE); setHintTextColor(Renderers.DIM); typeface = mono }
+        val t = field("Title", ct); val a = field("Artist", ca)
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(20), dp(8), dp(20), 0); addView(t); addView(a) }
+        AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert).setTitle("Search LRCLIB").setView(box)
+            .setPositiveButton("Search") { _, _ ->
+                toast("Searching…")
+                s.findCandidates(t.text.toString().trim(), a.text.toString().trim()) { showCandidates(s, it) }
+            }.setNegativeButton("Cancel", null).show()
     }
 
     private fun toggleViz() {
@@ -270,13 +305,11 @@ class MainActivity : Activity() {
 
     private fun widgetsChanged() {
         preview.invalidate()
-        val ids = AppWidgetManager.getInstance(this).getAppWidgetIds(ComponentName(this, VizWidgetProvider::class.java))
-        if (!VisualizerService.active) sendBroadcast(Intent(this, VizWidgetProvider::class.java)
-            .setAction(AppWidgetManager.ACTION_APPWIDGET_UPDATE).putExtra(AppWidgetManager.EXTRA_APPWIDGET_IDS, ids))
+        if (!VisualizerService.active) VizWidgetProvider.drawIdle(this)
     }
 
     // ---------- live state ----------
-    override fun onResume() { super.onResume(); ui.post(tick) }
+    override fun onResume() { super.onResume(); MediaListenerService.ensureBound(this); ui.post(tick) }
     override fun onPause() { ui.removeCallbacks(tick); super.onPause() }
     override fun onRequestPermissionsResult(r: Int, p: Array<out String>, g: IntArray) = refresh()
 
@@ -299,7 +332,13 @@ class MainActivity : Activity() {
         lyricControls.forEach { it.isEnabled = has; it.alpha = if (has) 1f else .35f }
         if (!dragging) { val ms = s?.latencyMs ?: 0; latBar.progress = ms / 50 + 100; latValue.text = latText(ms) }
 
-        vizState.text = when { VisualizerService.failed -> "UNSUPPORTED"; VisualizerService.active -> "LIVE"; else -> "STOPPED" }
+        vizState.text = when {
+            VisualizerService.failed -> "UNSUPPORTED"
+            VisualizerService.active -> "LIVE"
+            VisualizerService.stopReason == "IDLE" -> "STOPPED · IDLE"
+            VisualizerService.stopReason == "NO WIDGET" -> "STOPPED · NO WIDGET"
+            else -> "STOPPED"
+        }
         vizState.setTextColor(if (VisualizerService.active) Renderers.RED else LABEL)
         vizButton.text = if (VisualizerService.active) "STOP" else "START"
         stylePill(vizButton, !VisualizerService.active)

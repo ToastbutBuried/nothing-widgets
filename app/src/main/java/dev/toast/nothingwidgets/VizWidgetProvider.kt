@@ -1,24 +1,19 @@
 package dev.toast.nothingwidgets
 
+import android.Manifest
 import android.app.PendingIntent
 import android.appwidget.AppWidgetManager
 import android.appwidget.AppWidgetProvider
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.Manifest
+import android.graphics.Paint
 
 class VizWidgetProvider : AppWidgetProvider() {
-    override fun onUpdate(ctx: Context, mgr: AppWidgetManager, ids: IntArray) = idle(ctx, ids)
+    override fun onUpdate(ctx: Context, mgr: AppWidgetManager, ids: IntArray) { if (!VisualizerService.active) drawIdle(ctx) }
     override fun onAppWidgetOptionsChanged(ctx: Context, mgr: AppWidgetManager, id: Int, o: android.os.Bundle) {
-        if (!VisualizerService.active) idle(ctx, intArrayOf(id))
-    }
-
-    private fun idle(ctx: Context, ids: IntArray) {
-        for (id in ids) {
-            val w = VisualizerService.VIZ_PX; val h = VisualizerService.VIZ_PX
-            Renderers.push(ctx, Renderers.viz(w, h, FloatArray(8), Prefs.red(ctx), true, Prefs.bars(ctx)), intArrayOf(id), toggleIntent(ctx))
-        }
+        if (!VisualizerService.active) drawIdle(ctx)   // running service picks up the new size within a second
     }
 
     override fun onReceive(ctx: Context, intent: Intent) {
@@ -37,5 +32,17 @@ class VizWidgetProvider : AppWidgetProvider() {
         const val ACTION_TOGGLE = "dev.toast.nothingwidgets.TOGGLE_VIZ"
         fun toggleIntent(ctx: Context): PendingIntent = PendingIntent.getBroadcast(
             ctx, 0, Intent(ctx, VizWidgetProvider::class.java).setAction(ACTION_TOGGLE), PendingIntent.FLAG_IMMUTABLE)
+
+        /** stopped look: dark grid with a faint play triangle = "tap to start" */
+        fun drawIdle(ctx: Context) {
+            val mgr = AppWidgetManager.getInstance(ctx)
+            val p = Paint(Paint.ANTI_ALIAS_FLAG)
+            for (id in mgr.getAppWidgetIds(ComponentName(ctx, VizWidgetProvider::class.java))) {
+                val (w, h, _) = Renderers.sizePx(ctx, id, 110, 110, VisualizerService.CAP_PX)
+                val (cols, rows) = Renderers.grid(Prefs.bands(ctx), w, h)
+                val bmp = Renderers.viz(Surface(), p, w, h, FloatArray(cols), null, cols, rows, Prefs.red(ctx), true, Prefs.bars(ctx))
+                Renderers.push(ctx, bmp, intArrayOf(id)) { it.setOnClickPendingIntent(R.id.img, toggleIntent(ctx)) }
+            }
+        }
     }
 }

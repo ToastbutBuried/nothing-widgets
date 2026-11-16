@@ -4,14 +4,51 @@ import android.content.Context
 import android.graphics.*
 import android.widget.RemoteViews
 
+/** A reusable bitmap + canvas. One per widget/size and per thread, so frames don't allocate. */
+class Surface {
+    var bmp: Bitmap? = null; private set
+    val cv = Canvas()
+    fun begin(w: Int, h: Int, clear: Boolean = true): Canvas {
+        val b = bmp
+        if (b == null || b.width != w || b.height != h) { bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888); cv.setBitmap(bmp) }
+        else if (clear) b.eraseColor(Color.TRANSPARENT)
+        return cv
+    }
+
+    // visualizer cache key (shape the bitmap was last painted for)
+    internal var vizKey = ""
+    /** per-column signature of the last frame, so unchanged columns are not redrawn */
+    internal var colSig = IntArray(0)
+    /** false when the last viz() call produced exactly the previous frame (caller can skip pushing it) */
+    var changed = true; internal set
+}
+
+data class LyricsStyle(val size: Int = 1, val red: Boolean = true, val context: Boolean = true, val controls: Boolean = true, val playing: Boolean = false) {
+    companion object {
+        fun from(c: Context, playing: Boolean) = LyricsStyle(Prefs.lyrSize(c), Prefs.lyrRed(c), Prefs.lyrContext(c), Prefs.lyrControls(c), playing)
+    }
+}
+
 object Renderers {
     const val RED = 0xFFFF2D2D.toInt()
     const val WHITE = 0xFFF2F2F2.toInt()
     const val DIM = 0xFF5A5A5A.toInt()
+    private const val UNSUNG = 0xFF6E6E6E.toInt()
     /** top dot of a column is brightest; steep trail below (measured from the reference widget) */
     private val BAR_FADE = floatArrayOf(1f, .76f, .46f, .24f, .14f)
 
-    private fun tf(c: Context, res: Int) = c.resources.getFont(res)
+    // control zones on the lyrics widget (dp) - must match res/layout/widget_lyrics.xml
+    const val CTL_ZONE_DP = 34f
+    const val CTL_STRIP_DP = 40f
+    const val CTL_END_DP = 8f
+
+    private var reg: Typeface? = null
+    private var bold: Typeface? = null
+    private fun fonts(c: Context) { if (reg == null) { reg = c.resources.getFont(R.font.doto_regular); bold = c.resources.getFont(R.font.doto_bold) } }
+
+    // lyrics paints: only touched on the main thread
+    private val lp = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val lfill = Paint(Paint.ANTI_ALIAS_FLAG)
 
     private fun wrap(p: Paint, text: String, maxW: Float): List<String> {
         val out = ArrayList<String>(); var cur = ""
@@ -25,144 +62,241 @@ object Renderers {
 
     private fun ell(t: String, p: Paint, maxW: Float): String {
         if (p.measureText(t) <= maxW) return t
-        var e = t
-        while (e.isNotEmpty() && p.measureText("$e…") > maxW) e = e.dropLast(1)
-        return "$e…"
+        val n = p.breakText(t, true, maxW - p.measureText("…"), null)
+        return t.substring(0, n.coerceAtLeast(0)) + "…"
     }
 
-    /** w,h in px; d = px per dp. Everything is laid out in dp so a bigger widget gets more lines, not just bigger text. */
-    fun lyrics(ctx: Context, w: Int, h: Int, d: Float, lines: List<LrcLine>, pos: Double, status: String?, prev: Int = -2, t: Float = 1f): Bitmap {
-        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-        val cv = Canvas(bmp)
-        val card = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.BLACK }
-        cv.drawRoundRect(0f, 0f, w.toFloat(), h.toFloat(), 28 * d, 28 * d, card)
-        val reg = tf(ctx, R.font.doto_regular); val bold = tf(ctx, R.font.doto_bold)
+    // 5x5 dot glyphs for the widget controls
+    private val G_PREV = arrayOf("x...x", "x..xx", "x.xxx", "x..xx", "x...x")
+    private val G_NEXT = arrayOf("x...x", "xx..x", "xxx.x", "xx..x", "x...x")
+    private val G_PLAY = arrayOf("x....", "xxx..", "xxxxx", "xxx..", "x....")
+    private val G_PAUSE = arrayOf("xx.xx", "xx.xx", "xx.xx", "xx.xx", "xx.xx")
+    private fun glyph(cv: Canvas, g: Array<String>, cx: Float, cy: Float, d: Float, p: Paint) {
+        val s = 3.2f * d
+        for (r in 0 until 5) for (c in 0 until 5) if (g[r][c] == 'x')
+            cv.drawCircle(cx + (c - 2) * s, cy + (r - 2) * s, 1.15f * d, p)
+    }
+
+    /**
+     * w,h in px; d = px per dp. Laid out in dp, so a bigger widget gets more lines, not just bigger text.
+     * prev/t drive the line-change slide (t 0..1), [pos] already includes the per-song latency.
+     */
+    fun lyrics(ctx: Context, surf: Surface, w: Int, h: Int, d: Float, lines: List<LrcLine>, pos: Double, status: String?,
+               prev: Int = -2, t: Float = 1f, st: LyricsStyle = LyricsStyle()): Bitmap {
+        fonts(ctx)
+        val cv = surf.begin(w, h)
+        val accent = if (st.red) RED else WHITE
+        val p = lp
+        p.reset(); p.isAntiAlias = true
+        p.color = Color.BLACK
+        cv.drawRoundRect(0f, 0f, w.toFloat(), h.toFloat(), 28 * d, 28 * d, p)
         val pad = 16 * d
-        val p = Paint(Paint.ANTI_ALIAS_FLAG)
         // header
         p.typeface = reg; p.textSize = 10 * d; p.letterSpacing = 0.15f
         val hy = pad + 8 * d
-        p.color = RED; cv.drawCircle(pad + 3 * d, hy - 3.5f * d, 3 * d, p)
-        p.color = DIM; cv.drawText("LYRICS", pad + 12 * d, hy, p)
-        val m = (pos / 60).toInt(); val sec = (pos % 60).toInt()
+        p.color = accent; cv.drawCircle(pad + 3 * d, hy - 3.5f * d, 3 * d, p)
+        p.color = DIM; cv.drawText(if (status == "PLAIN") "LYRICS · PLAIN" else "LYRICS", pad + 12 * d, hy, p)
+        val m = (pos.coerceAtLeast(0.0) / 60).toInt(); val sec = (pos.coerceAtLeast(0.0) % 60).toInt()
         p.textAlign = Paint.Align.RIGHT; cv.drawText("$m:" + sec.toString().padStart(2, '0'), w - pad, hy, p); p.textAlign = Paint.Align.LEFT
         p.letterSpacing = 0f
-        // dotted progress bar
+        // bottom row: dotted progress bar, plus controls on the right
+        val ctlW = if (st.controls) (CTL_ZONE_DP * 3 + CTL_END_DP - 4) * d else 0f
+        val by = h - pad - 2 * d
         val end = if (lines.isEmpty()) 1.0 else lines.last().t + 4
         val frac = (pos / end).coerceIn(0.0, 1.0)
-        val step = 7 * d; val n = ((w - 2 * pad) / step).toInt()
-        val dot = Paint(Paint.ANTI_ALIAS_FLAG)
-        val by = h - pad - 2 * d
+        val step = 7 * d; val n = ((w - 2 * pad - ctlW) / step).toInt().coerceAtLeast(0)
         for (k in 0 until n) {
-            dot.color = if (k < frac * n) Color.WHITE else 0xFF444444.toInt()
-            cv.drawCircle(pad + step * (k + .5f), by, 1.5f * d, dot)
+            p.color = if (k < frac * n) WHITE else 0xFF444444.toInt()
+            cv.drawCircle(pad + step * (k + .5f), by, 1.5f * d, p)
+        }
+        if (st.controls) {
+            p.color = 0xFFB0B0B0.toInt()
+            val cy = h - CTL_STRIP_DP / 2 * d
+            val x0 = w - (CTL_END_DP + CTL_ZONE_DP * 3) * d
+            glyph(cv, G_PREV, x0 + CTL_ZONE_DP * .5f * d, cy, d, p)
+            glyph(cv, if (st.playing) G_PAUSE else G_PLAY, x0 + CTL_ZONE_DP * 1.5f * d, cy, d, p)
+            glyph(cv, G_NEXT, x0 + CTL_ZONE_DP * 2.5f * d, cy, d, p)
         }
         // lyrics area
-        val top = hy + 10 * d; val bottom = by - 12 * d
+        val top = hy + 10 * d; val bottom = minOf(by, h - CTL_STRIP_DP * d) - 10 * d
         val area = bottom - top; val maxW = w - 2 * pad
         val idx = LrcParser.index(lines, pos)
         if (lines.isEmpty()) {
             p.typeface = bold; p.textSize = 20 * d; p.color = WHITE
             cv.drawText(ell(status ?: "NO LYRICS", p, maxW), pad, (top + bottom) / 2 + 7 * d, p)
-            return bmp
+            return surf.bmp!!
         }
-        fun block(i: Int, dy: Float, alpha: Int) {
+        val scale = floatArrayOf(.8f, 1f, 1.22f)[st.size.coerceIn(0, 2)]
+        fun block(i: Int, dy: Float, alpha: Int, live: Boolean) {
             val sc = cv.saveLayerAlpha(0f, top - 6 * d, w.toFloat(), bottom + 6 * d, alpha)
             cv.clipRect(0f, top - 6 * d, w.toFloat(), bottom + 6 * d)
             cv.translate(0f, dy)
-            val cur = if (i >= 0) lines[i].s.ifEmpty { "♪" } else "♪"
-            // largest current-line size that wraps into at most maxLines lines within ~60% of the area
+            val line = lines.getOrNull(i)
+            val cur = line?.s?.ifEmpty { "♪" } ?: "♪"
             p.typeface = bold
             val maxLines = if (area > 150 * d) 4 else if (area > 90 * d) 3 else 2
-            var size = minOf(30f, maxOf(14f, area / d * 0.16f))
+            var size = minOf(30f * scale, maxOf(14f * scale, area / d * 0.2f * scale))
             var wrapped: List<String>
+            val textW = maxW - 14 * d
             while (true) {
                 p.textSize = size * d
-                wrapped = wrap(p, cur, maxW - 14 * d)
-                if ((wrapped.size <= maxLines && wrapped.size * size * 1.2f * d <= area * .7f) || size <= 11f) break
+                wrapped = wrap(p, cur, textW)
+                if ((wrapped.size <= maxLines && wrapped.size * size * 1.2f * d <= area * .72f) || size <= 11f) break
                 size -= 1f
             }
             val lh = size * 1.2f * d
             val curH = wrapped.size * lh
             val y0 = top + (area - curH) / 2
-            p.color = WHITE
-            wrapped.forEachIndexed { k, t -> cv.drawText(if (k == wrapped.lastIndex || true) ell(t, p, maxW - 14 * d) else t, pad + 14 * d, y0 + lh * k + size * d, p) }
-            val red = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = RED }
-            cv.drawCircle(pad + 4 * d, y0 + size * d * 0.6f, 3.5f * d, red)
-            // context lines, as many as fit
-            val csize = maxOf(10f, size * 0.55f)
-            p.typeface = reg; p.textSize = csize * d; p.color = DIM
-            val cl = csize * 1.7f * d
-            val fit = ((area - curH) / 2 / cl).toInt().coerceIn(0, 2)
-            for (off in 1..fit) {
-                val before = i - off; val after = i + off
-                if (before in lines.indices) cv.drawText(ell(lines[before].s.ifEmpty { "♪" }, p, maxW), pad, y0 - cl * (off - 1) - csize * .5f * d, p)
-                if (after in lines.indices) cv.drawText(ell(lines[after].s.ifEmpty { "♪" }, p, maxW), pad, y0 + curH + cl * (off - 1) + csize * 1.1f * d, p)
+            // karaoke: chars sung so far (whole line when the line has no word timings)
+            val karaoke = live && line != null && line.words.isNotEmpty()
+            val sung = if (karaoke) LrcParser.sungChars(line!!, lines.getOrNull(i + 1), pos) else Float.MAX_VALUE
+            var charStart = 0
+            wrapped.forEachIndexed { k, seg ->
+                val txt = ell(seg, p, textW)
+                val x = pad + 14 * d; val y = y0 + lh * k + size * d
+                if (!karaoke) { p.color = WHITE; cv.drawText(txt, x, y, p) }
+                else {
+                    p.color = UNSUNG; cv.drawText(txt, x, y, p)
+                    val inSeg = (sung - charStart).coerceIn(0f, txt.length.toFloat())
+                    if (inSeg > 0f) {
+                        val whole = inSeg.toInt()
+                        var fillW = p.measureText(txt, 0, whole)
+                        if (whole < txt.length) fillW += p.measureText(txt, whole, whole + 1) * (inSeg - whole)
+                        cv.save(); cv.clipRect(x, y - size * d * 1.2f, x + fillW, y + size * d * .4f)
+                        lfill.set(p); lfill.color = WHITE
+                        cv.drawText(txt, x, y, lfill); cv.restore()
+                    }
+                }
+                charStart += seg.length + 1
+            }
+            p.color = accent
+            cv.drawCircle(pad + 4 * d, y0 + size * d * 0.6f, 3.5f * d, p)
+            if (st.context) {
+                val csize = maxOf(10f, size * 0.55f)
+                p.typeface = reg; p.textSize = csize * d; p.color = DIM
+                val cl = csize * 1.7f * d
+                val fit = ((area - curH) / 2 / cl).toInt().coerceIn(0, 2)
+                for (off in 1..fit) {
+                    val before = i - off; val after = i + off
+                    if (before in lines.indices) cv.drawText(ell(lines[before].s.ifEmpty { "♪" }, p, maxW), pad, y0 - cl * (off - 1) - csize * .5f * d, p)
+                    if (after in lines.indices) cv.drawText(ell(lines[after].s.ifEmpty { "♪" }, p, maxW), pad, y0 + curH + cl * (off - 1) + csize * 1.1f * d, p)
+                }
             }
             cv.restoreToCount(sc)
         }
         if (t < 1f && prev != idx && prev >= -1) {
             val e = 1f - (1f - t) * (1f - t) * (1f - t) // ease-out cubic
             val sh = 16 * d
-            block(prev, -e * sh, ((1f - e) * 255).toInt())
-            block(idx, (1f - e) * sh, (e * 255).toInt())
-        } else block(idx, 0f, 255)
-        return bmp
+            block(prev, -e * sh, ((1f - e) * 255).toInt(), false)
+            block(idx, (1f - e) * sh, (e * 255).toInt(), true)
+        } else block(idx, 0f, 255, true)
+        return surf.bmp!!
     }
 
-    fun viz(w: Int, h: Int, levels: FloatArray, red: Boolean, idle: Boolean, bars: Boolean = false): Bitmap {
-        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-        val cv = Canvas(bmp)
-        val card = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = if (bars) 0xFF19191A.toInt() else 0xFF1B1B1B.toInt() }
-        val r = minOf(w, h) * 0.12f
-        cv.drawRoundRect(0f, 0f, w.toFloat(), h.toFloat(), r, r, card)
-        val cols = 8; val rows = 8
+    /**
+     * Grid of rows x cols round dots. levels/caps 0..1 per column. Paint passed in so each thread has its own.
+     * Fast path: the bitmap is reused and only columns whose dots changed since the last frame are repainted
+     * (measured: plain anti-aliased circles beat bitmap-sprite blits on this phone).
+     */
+    fun viz(surf: Surface, p: Paint, w: Int, h: Int, levels: FloatArray, caps: FloatArray?, cols: Int, rows: Int,
+            red: Boolean, idle: Boolean, bars: Boolean): Bitmap {
         val pad = minOf(w, h) * .1f
-        val cw = (w - 2 * pad) / cols; val rh = (h - 2 * pad) / rows
-        val rad = minOf(cw, rh) * .38f
-        val p = Paint(Paint.ANTI_ALIAS_FLAG)
+        val cell = minOf((w - 2 * pad) / cols, (h - 2 * pad) / rows)
+        val ox = (w - cell * cols) / 2; val oy = (h - cell * rows) / 2
+        val rad = cell * .38f
+        val cardColor = if (bars) 0xFF19191A.toInt() else 0xFF1B1B1B.toInt()
+        val offColor = if (bars) 0xFF232325.toInt() else 0xFF262626.toInt()
+        val key = "$w,$h,$cols,$rows,$bars"
+        val fresh = surf.vizKey != key || surf.bmp == null || surf.bmp!!.width != w || surf.bmp!!.height != h
+        val cv = surf.begin(w, h, clear = fresh)
+        p.reset(); p.isAntiAlias = true
+        if (fresh) {
+            p.color = cardColor
+            val r = minOf(w, h) * 0.12f
+            cv.drawRoundRect(0f, 0f, w.toFloat(), h.toFloat(), r, r, p)
+            surf.colSig = IntArray(cols) { Int.MIN_VALUE }; surf.vizKey = key
+        }
+        val lit = if (red) RED else Color.WHITE
+        val capColor = if (red) WHITE else RED
+        val vals = IntArray(rows)              // per row: 0 = off, else alpha | (1 shl 9 when cap colour)
+        var any = false
         for (c in 0 until cols) {
-            val lvl = if (idle) 0f else levels[c].coerceIn(0f, 1f)
-            val pos = lvl * rows                       // continuous height in dots
+            val lvl = if (idle) 0f else levels.getOrElse(c) { 0f }.coerceIn(0f, 1f)
+            val pos = lvl * rows
+            val capRow = if (!idle && caps != null && bars) (caps.getOrElse(c) { 0f } * rows).toInt().coerceAtMost(rows - 1) else -1
+            var sig = 17
             for (row in 0 until rows) {
-                val dist = pos - (row + 1)             // >=0: fully inside the bar, in (-1,0): partial top dot
-                val b = if (!bars) {
-                    val n = Math.round(pos); val k = n - 1 - row
-                    if (row < n) maxOf(.2f, 1 - k * .17f) else 0f
-                } else if (dist >= 0f) {
-                    val i0 = dist.toInt().coerceAtMost(BAR_FADE.size - 1); val i1 = minOf(i0 + 1, BAR_FADE.size - 1)
-                    BAR_FADE[i0] + (BAR_FADE[i1] - BAR_FADE[i0]) * (dist - i0).coerceIn(0f, 1f)
-                } else if (dist > -1f) (1 + dist) * BAR_FADE[0] else 0f
-                p.color = if (b > 0.02f) {
-                    val a = (b * 255).toInt()
-                    if (red) Color.argb(a, 255, 45, 45) else Color.argb(a, 255, 255, 255)
-                } else if (bars) 0xFF232325.toInt() else 0xFF262626.toInt()
-                cv.drawCircle(pad + cw * (c + .5f), h - pad - rh * (row + .5f), rad, p)
+                val dist = pos - (row + 1)
+                val v = when {
+                    row == capRow && row >= pos.toInt() && capRow > 0 -> 255 or (1 shl 9)
+                    idle -> if (playHint(c, row, cols, rows)) 82 else 0
+                    else -> {
+                        val b = if (!bars) {
+                            val n = Math.round(pos); val k = n - 1 - row
+                            if (row < n) maxOf(.2f, 1 - k * .17f) else 0f
+                        } else if (dist >= 0f) {
+                            val i0 = dist.toInt().coerceAtMost(BAR_FADE.size - 1); val i1 = minOf(i0 + 1, BAR_FADE.size - 1)
+                            BAR_FADE[i0] + (BAR_FADE[i1] - BAR_FADE[i0]) * (dist - i0).coerceIn(0f, 1f)
+                        } else if (dist > -1f) (1 + dist) * BAR_FADE[0] else 0f
+                        if (b > 0.02f) ((b * 255).toInt() and 0xF8).coerceAtLeast(8) else 0   // quantised: tiny changes don't redraw
+                    }
+                }
+                vals[row] = v; sig = sig * 31 + v
+            }
+            sig = sig * 31 + lit
+            if (sig == surf.colSig[c]) continue
+            surf.colSig[c] = sig; any = true
+            // repaint this column: card colour over the grid cells (inside the rounded corners), then its dots
+            val x0 = ox + cell * c
+            p.color = cardColor
+            cv.drawRect(x0, oy, x0 + cell, oy + cell * rows, p)
+            val cx = x0 + cell * .5f
+            for (row in 0 until rows) {
+                val v = vals[row]
+                p.color = when {
+                    v == 0 -> offColor
+                    v and (1 shl 9) != 0 -> capColor
+                    else -> Color.argb(v and 0xFF, Color.red(lit), Color.green(lit), Color.blue(lit))
+                }
+                cv.drawCircle(cx, oy + cell * (rows - row - .5f), rad, p)
             }
         }
-        return bmp
+        surf.changed = any || fresh
+        return surf.bmp!!
     }
 
-    fun push(ctx: Context, bmp: Bitmap, ids: IntArray, click: android.app.PendingIntent? = null) {
+    /** a faint "play" triangle drawn with the grid dots while the visualizer is stopped */
+    private fun playHint(c: Int, row: Int, cols: Int, rows: Int): Boolean {
+        val u = (c + .5f) / cols; val v = (row + .5f) / rows
+        return u in 0.28f..0.74f && Math.abs(v - .5f) <= 0.27f * (0.74f - u) / 0.46f
+    }
+
+    fun push(ctx: Context, bmp: Bitmap, ids: IntArray, layout: Int = R.layout.widget_image, setup: ((RemoteViews) -> Unit)? = null) {
         val mgr = android.appwidget.AppWidgetManager.getInstance(ctx)
-        for (id in ids) {
-            val rv = RemoteViews(ctx.packageName, R.layout.widget_image)
-            rv.setImageViewBitmap(R.id.img, bmp)
-            if (click != null) rv.setOnClickPendingIntent(R.id.img, click)
-            mgr.updateAppWidget(id, rv)
-        }
+        val rv = RemoteViews(ctx.packageName, layout)
+        rv.setImageViewBitmap(R.id.img, bmp)
+        setup?.invoke(rv)
+        for (id in ids) mgr.updateAppWidget(id, rv)
+    }
+
+    /** Frame update: only swaps the bitmap on the already-inflated widget (no re-inflate in the launcher). */
+    fun pushFrame(ctx: Context, bmp: Bitmap, ids: IntArray) {
+        val rv = RemoteViews(ctx.packageName, R.layout.widget_image)
+        rv.setImageViewBitmap(R.id.img, bmp)
+        android.appwidget.AppWidgetManager.getInstance(ctx).partiallyUpdateAppWidget(ids, rv)
     }
 
     /** Widget size in px plus px-per-dp, from its options. Capped so the bitmap stays small enough for RemoteViews. */
-    fun sizePx(ctx: Context, id: Int, defW: Int, defH: Int): Triple<Int, Int, Float> {
+    fun sizePx(ctx: Context, id: Int, defW: Int, defH: Int, cap: Float = 1000f): Triple<Int, Int, Float> {
         val o = android.appwidget.AppWidgetManager.getInstance(ctx).getAppWidgetOptions(id)
         val land = ctx.resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
         val wDp = o.getInt(if (land) android.appwidget.AppWidgetManager.OPTION_APPWIDGET_MAX_WIDTH else android.appwidget.AppWidgetManager.OPTION_APPWIDGET_MIN_WIDTH, defW).coerceAtLeast(60)
         val hDp = o.getInt(if (land) android.appwidget.AppWidgetManager.OPTION_APPWIDGET_MIN_HEIGHT else android.appwidget.AppWidgetManager.OPTION_APPWIDGET_MAX_HEIGHT, defH).coerceAtLeast(60)
         var d = ctx.resources.displayMetrics.density
-        val cap = 1000f
         val big = maxOf(wDp * d, hDp * d)
         if (big > cap) d *= cap / big
         return Triple((wDp * d).toInt(), (hDp * d).toInt(), d)
     }
+
+    fun grid(bandsPref: Int, w: Int, h: Int) = Grid.of(bandsPref, w, h)
 }

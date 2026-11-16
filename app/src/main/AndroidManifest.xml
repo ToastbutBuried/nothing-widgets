@@ -6,9 +6,12 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <application
         android:label="Nothing Widgets"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher"
         android:theme="@android:style/Theme.DeviceDefault.NoActionBar"
         android:allowBackup="false">
 
@@ -20,7 +23,12 @@
         </activity>
 
         <receiver android:name=".LyricsWidgetProvider" android:exported="true">
-            <intent-filter><action android:name="android.appwidget.action.APPWIDGET_UPDATE" /></intent-filter>
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+                <action android:name="dev.toast.nothingwidgets.LYR_PREV" />
+                <action android:name="dev.toast.nothingwidgets.LYR_PLAY" />
+                <action android:name="dev.toast.nothingwidgets.LYR_NEXT" />
+            </intent-filter>
             <meta-data android:name="android.appwidget.provider" android:resource="@xml/lyrics_widget_info" />
         </receiver>
 
@@ -37,6 +45,13 @@
             android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
             <intent-filter><action android:name="android.service.notification.NotificationListenerService" /></intent-filter>
         </service>
+
+        <receiver android:name=".BootReceiver" android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
 
         <service android:name=".VisualizerService" android:exported="false"
             android:foregroundServiceType="microphone" />

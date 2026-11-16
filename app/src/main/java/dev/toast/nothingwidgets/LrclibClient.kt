@@ -49,32 +49,58 @@ object LrclibClient {
 
     private fun enc(s: String) = URLEncoder.encode(s, "UTF-8")
 
-    /** All synced candidates LRCLIB offers for this track (two query styles merged). null = network error. */
-    fun search(title: String, artist: String): List<Candidate>? {
-        val a = get("https://lrclib.net/api/search?track_name=${enc(title)}&artist_name=${enc(artist)}")
-        val b = get("https://lrclib.net/api/search?q=${enc("$title $artist".trim())}")
-        if (a == null && b == null) return null
-        val seen = HashSet<Long>(); val out = ArrayList<Candidate>()
-        for (arr in listOfNotNull(a, b)) for (i in 0 until arr.length()) {
-            val o = arr.getJSONObject(i)
-            if (o.isNull("syncedLyrics")) continue
-            val s = o.optString("syncedLyrics", "")
-            if (s.isEmpty() || !seen.add(o.optLong("id"))) continue
-            out.add(Candidate(o.optLong("id"), o.optString("trackName"), o.optString("artistName"), o.optDouble("duration", 0.0), s))
+    /** Synced candidates plus the first plain-only text, if any. */
+    class Result(val synced: List<Candidate>, val plain: String?)
+
+    /** Searches raw metadata, then cleaned title+artist, then cleaned title alone; merged, deduped. null = network error. */
+    fun search(title: String, artist: String): Result? {
+        val (ct, ca) = TitleCleaner.clean(title, artist)
+        val urls = LinkedHashSet<String>()
+        urls.add("https://lrclib.net/api/search?track_name=${enc(title)}&artist_name=${enc(artist)}")
+        if (ct.isNotEmpty()) {
+            urls.add("https://lrclib.net/api/search?track_name=${enc(ct)}&artist_name=${enc(ca)}")
+            urls.add("https://lrclib.net/api/search?q=${enc("$ct $ca".trim())}")
+            urls.add("https://lrclib.net/api/search?track_name=${enc(ct)}")
         }
-        return out
+        val seen = HashSet<Long>(); val out = ArrayList<Candidate>(); var plain: String? = null; var any = false
+        for (u in urls) {
+            val arr = get(u) ?: continue
+            any = true
+            for (i in 0 until arr.length()) {
+                val o = arr.getJSONObject(i)
+                if (!seen.add(o.optLong("id"))) continue
+                val s = if (o.isNull("syncedLyrics")) "" else o.optString("syncedLyrics", "")
+                if (s.isEmpty()) {
+                    if (plain == null && !o.isNull("plainLyrics")) plain = o.optString("plainLyrics", "").ifEmpty { null }
+                    continue
+                }
+                out.add(Candidate(o.optLong("id"), o.optString("trackName"), o.optString("artistName"), o.optDouble("duration", 0.0), s))
+            }
+            if (out.size >= 6) break   // enough choices, save requests
+        }
+        return if (any) Result(out, plain) else null
     }
 
-    /** Blocking. Order: your pick, then cache, then best auto match (closest duration). "" = none exists, null = offline. */
+    const val PLAIN = "#PLAIN\n"
+
+    /** Blocking. Order: your pick, then cache, then best auto match. "" = none, null = offline, PLAIN prefix = unsynced text. */
     fun fetch(ctx: Context, title: String, artist: String, durationSec: Long?): String? {
         val ch = choiceFile(ctx, title, artist)
         if (ch.exists()) return ch.readText()
         val f = cacheFile(ctx, title, artist)
         if (f.exists()) return f.readText()
-        val list = search(title, artist) ?: return null
-        val best = if (durationSec != null && durationSec > 0) list.minByOrNull { Math.abs(it.duration - durationSec) } else list.firstOrNull()
-        val out = best?.synced ?: ""
+        val r = search(title, artist) ?: return null
+        val out = pickBest(r.synced, durationSec)?.synced ?: r.plain?.let { PLAIN + it } ?: ""
         f.writeText(out)
         return out
+    }
+
+    /** closest duration within 3 s wins, otherwise the first hit */
+    fun pickBest(list: List<Candidate>, durationSec: Long?): Candidate? {
+        if (durationSec != null && durationSec > 0) {
+            val near = list.filter { Math.abs(it.duration - durationSec) <= 3 }.minByOrNull { Math.abs(it.duration - durationSec) }
+            if (near != null) return near
+        }
+        return list.firstOrNull()
     }
 }
