@@ -42,6 +42,9 @@ class MainActivity : Activity() {
     private lateinit var latBar: SeekBar
     private lateinit var lyricControls: List<View>
     private lateinit var vizState: TextView
+    private lateinit var swipeState: TextView
+    private lateinit var swipePill: TextView
+    private lateinit var radiusValue: TextView
     private lateinit var vizButton: TextView
     private lateinit var sensValue: TextView
     private lateinit var preview: PreviewView
@@ -136,7 +139,7 @@ class MainActivity : Activity() {
             addView(text("NOTHING", 34f, Renderers.WHITE, dotoB))
             addView(text("WIDGETS", 34f, Renderers.RED, dotoB))
             addView(space(8))
-            addView(text("lyrics · visualizer", 12f, Renderers.DIM))
+            addView(text("lyrics · artwork · visualizer", 12f, Renderers.DIM))
         }, 20)
 
         // setup
@@ -196,8 +199,31 @@ class MainActivity : Activity() {
             addView(sub("TEXT SIZE")); addView(segmented(listOf("S", "M", "L"), Prefs.lyrSize(context)) { Prefs.setLyrSize(context, it); lyrChanged() }); addView(space(14))
             addView(sub("ACCENT")); addView(segmented(listOf("Red", "Mono"), if (Prefs.lyrRed(context)) 0 else 1) { Prefs.setLyrRed(context, it == 0); lyrChanged() }); addView(space(14))
             addView(sub("CONTEXT LINES")); addView(segmented(listOf("On", "Off"), if (Prefs.lyrContext(context)) 0 else 1) { Prefs.setLyrContext(context, it == 0); lyrChanged() }); addView(space(14))
-            addView(sub("PLAYER BUTTONS")); addView(segmented(listOf("On", "Off"), if (Prefs.lyrControls(context)) 0 else 1) { Prefs.setLyrControls(context, it == 0); lyrChanged() }); addView(space(8))
-            addView(text("Tap the widget to open this screen; ⏮ ⏯ ⏭ sit bottom right. Word-by-word fill shows when LRCLIB has word timings.", 11f, Renderers.DIM))
+            addView(sub("PLAYER BUTTONS")); addView(segmented(listOf("On", "Off"), if (Prefs.lyrControls(context)) 0 else 1) { Prefs.setLyrControls(context, it == 0); lyrChanged() }); addView(space(14))
+            addView(sub("TAP TO SEEK")); addView(segmented(listOf("On", "Off"), if (Prefs.lyrSeek(context)) 0 else 1) { Prefs.setLyrSeek(context, it == 0); lyrChanged() }); addView(space(8))
+            addView(text("Tap a lyric line to jump to it (synced lyrics only), anywhere else to open this screen; ⏮ ⏯ ⏭ sit bottom right. Word-by-word fill shows when LRCLIB has word timings.", 11f, Renderers.DIM))
+        })
+
+        // artwork widget
+        swipeState = text("", 11f, LABEL, dotoB)
+        swipePill = pill("Enable swipes", primary = true) {
+            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+            toast("Installed apps › Nothing Widgets swipes › On")
+        }
+        add(card().apply {
+            addView(header("Artwork widget", swipeState)); addView(space(14))
+            addView(text("Cover art. Swipe left: next track, right: previous. Swipe up: lyrics, down: back to the cover. Tap: pause / play. Long-press still moves the widget.", 12f, Renderers.WHITE).apply { setLineSpacing(0f, 1.25f) })
+            addView(space(16))
+            radiusValue = text("${Prefs.artRadius(context)} dp", 12f, Renderers.WHITE, dotoB)
+            addView(header("Corner rounding", radiusValue)); addView(space(4))
+            addView(slider(40, Prefs.artRadius(context)) { p, user ->
+                if (!user) return@slider
+                Prefs.setArtRadius(context, p); radiusValue.text = "$p dp"
+                MediaListenerService.instance?.artChanged() ?: ArtWidgetProvider.draw(context, ArtWidgetProvider.ids(context))
+            }); addView(space(4))
+            addView(text("19 dp matches Nothing's own widgets.", 11f, Renderers.DIM)); addView(space(16))
+            addView(swipePill, LinearLayout.LayoutParams(MATCH_PARENT, dp(48))); addView(space(8))
+            addView(text("Widgets can't receive swipes on their own, so an accessibility service lays an invisible touch layer over this one widget while the home screen shows. Without it a tap still pauses.", 11f, Renderers.DIM))
         })
 
         // visualizer
@@ -331,6 +357,11 @@ class MainActivity : Activity() {
         lyrState.text = if (has) s!!.lyricInfo() else "IDLE"
         lyricControls.forEach { it.isEnabled = has; it.alpha = if (has) 1f else .35f }
         if (!dragging) { val ms = s?.latencyMs ?: 0; latBar.progress = ms / 50 + 100; latValue.text = latText(ms) }
+
+        val sw = GestureService.enabled(this)
+        swipeState.text = if (sw) "SWIPES ON" else "SWIPES OFF"
+        swipeState.setTextColor(if (sw) Renderers.RED else LABEL)
+        swipePill.visibility = if (sw) View.GONE else View.VISIBLE
 
         vizState.text = when {
             VisualizerService.failed -> "UNSUPPORTED"

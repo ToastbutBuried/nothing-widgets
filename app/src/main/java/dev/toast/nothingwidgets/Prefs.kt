@@ -35,4 +35,15 @@ object Prefs {
     fun setLyrContext(c: Context, v: Boolean) = setB(c, "lyrCtx", v)
     fun lyrControls(c: Context) = b(c, "lyrCtl", true)
     fun setLyrControls(c: Context, v: Boolean) = setB(c, "lyrCtl", v)
+    /** tap a lyric line on the widget to seek to its start */
+    fun lyrSeek(c: Context) = b(c, "lyrSeek", true)
+    fun setLyrSeek(c: Context, v: Boolean) = setB(c, "lyrSeek", v)
+
+    // artwork widget
+    /** 0 = album art, 1 = lyrics (swiped up) */
+    fun artMode(c: Context) = i(c, "artMode", 0)
+    fun setArtMode(c: Context, v: Int) = setI(c, "artMode", v)
+    /** corner radius in dp; 19 matches Nothing's own music widget (measured on the phone) */
+    fun artRadius(c: Context) = i(c, "artRadius", 19)
+    fun setArtRadius(c: Context, v: Int) = setI(c, "artRadius", v)
 }

@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="gesture_desc">Lets the Artwork widget take swipes: left/right to skip tracks, up/down to switch between cover and lyrics, tap to pause. It only places an invisible touch layer over that widget while the home screen is showing, and reads nothing else.</string>
+</resources>

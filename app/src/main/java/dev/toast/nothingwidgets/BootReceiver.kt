@@ -12,5 +12,6 @@ class BootReceiver : BroadcastReceiver() {
         val mgr = AppWidgetManager.getInstance(ctx)
         LyricsWidgetProvider.draw(ctx, mgr.getAppWidgetIds(ComponentName(ctx, LyricsWidgetProvider::class.java)))
         VizWidgetProvider.drawIdle(ctx)
+        ArtWidgetProvider.draw(ctx, ArtWidgetProvider.ids(ctx))
     }
 }

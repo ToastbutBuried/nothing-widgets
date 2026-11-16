@@ -34,10 +34,13 @@ class MediaListenerService : NotificationListenerService() {
     // per-widget caches: pixel size and reusable bitmap
     private val sizes = HashMap<Int, Triple<Int, Int, Float>>()
     private val surfaces = HashMap<Int, Surface>()
+    private val hits = ArrayList<LineHit>(5)
+    /** what each artwork widget last showed in cover mode, so it is only pushed when something changed */
+    private val artSig = HashMap<Int, String>()
 
     private val cb = object : MediaController.Callback() {
         override fun onPlaybackStateChanged(state: PlaybackState?) { redraw() }
-        override fun onMetadataChanged(metadata: MediaMetadata?) { loadTrack(); redraw() }
+        override fun onMetadataChanged(metadata: MediaMetadata?) { loadTrack(); loadArt(); redraw() }
         override fun onSessionDestroyed() { main.post { pick(currentSessions()) } }
     }
     private val sessionsListener = MediaSessionManager.OnActiveSessionsChangedListener { pick(it) }
@@ -92,17 +95,47 @@ class MediaListenerService : NotificationListenerService() {
             }
             watched[c.sessionToken] = w; c.registerCallback(w, main)
         }
-        loadTrack(); redraw()
+        loadTrack(); loadArt(); redraw()
+    }
+
+    // ---- album art (artwork widget) ----
+    private var art: android.graphics.Bitmap? = null
+    private var artSrc: Any? = null
+    /** bumps whenever the track or its cover changes; the swipe overlay waits on it after a skip */
+    @Volatile var trackVer = 0
+        private set
+
+    private fun loadArt() {
+        val md = controller?.metadata
+        val bmp = md?.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART) ?: md?.getBitmap(MediaMetadata.METADATA_KEY_ART)
+            ?: md?.getBitmap(MediaMetadata.METADATA_KEY_DISPLAY_ICON)
+        val uri = if (bmp != null) null else (md?.getString(MediaMetadata.METADATA_KEY_ALBUM_ART_URI)
+            ?: md?.getString(MediaMetadata.METADATA_KEY_ART_URI) ?: md?.getString(MediaMetadata.METADATA_KEY_DISPLAY_ICON_URI))
+        val src: Any? = bmp ?: uri
+        if (src == artSrc && (src != null || art == null)) return
+        artSrc = src
+        if (bmp != null || uri == null) { art = bmp; trackVer++; artSig.clear(); return }
+        art = null; trackVer++; artSig.clear()
+        val k = trackKey
+        io.execute {
+            val b = try {
+                contentResolver.openInputStream(android.net.Uri.parse(uri))?.use { android.graphics.BitmapFactory.decodeStream(it) }
+            } catch (_: Exception) { null }
+            main.post { if (artSrc == uri && trackKey == k && b != null) { art = b; trackVer++; artSig.clear(); redraw() } }
+        }
     }
 
     private fun loadTrack() {
         val md = controller?.metadata
         val title = md?.getString(MediaMetadata.METADATA_KEY_TITLE) ?: ""
         val artist = md?.getString(MediaMetadata.METADATA_KEY_ARTIST) ?: md?.getString(MediaMetadata.METADATA_KEY_ALBUM_ARTIST) ?: ""
-        if (title.isEmpty()) { trackKey = ""; lines = emptyList(); status = "NO MUSIC"; latencyMs = 0; return }
+        if (title.isEmpty()) {
+            if (trackKey.isNotEmpty()) trackVer++
+            trackKey = ""; lines = emptyList(); status = "NO MUSIC"; latencyMs = 0; curTitle = ""; curArtist = ""; return
+        }
         val k = "$title|$artist"
         if (k == trackKey) return
-        trackKey = k; lines = emptyList(); status = "SEARCHING…"; shownIdx = -2
+        trackKey = k; lines = emptyList(); status = "SEARCHING…"; shownIdx = -2; trackVer++
         val dur = (md?.getLong(MediaMetadata.METADATA_KEY_DURATION) ?: 0L) / 1000
         curTitle = title; curArtist = artist; curDur = dur
         latencyMs = LatencyStore.get(this, k)   // each song keeps its own saved latency
@@ -142,6 +175,13 @@ class MediaListenerService : NotificationListenerService() {
         }
     }
 
+    /** Tap-to-seek: [lineMs] is the line's start in lyric time, so take the latency back off. Ignored if the song changed. */
+    fun seekToLine(lineMs: Long, track: Int) {
+        if (lineMs < 0 || track != trackKey.hashCode() || trackKey.isEmpty()) return
+        controller?.transportControls?.seekTo((lineMs - latencyMs).coerceAtLeast(0))
+        shownIdx = -2   // snap to the new line instead of sliding
+    }
+
     // ---- used by the settings screen ----
     fun refreshLyrics() { LrclibClient.clear(this, curTitle, curArtist); trackKey = ""; shownIdx = -2; loadTrack(); redraw() }
 
@@ -159,7 +199,21 @@ class MediaListenerService : NotificationListenerService() {
         ?: ("${lines.size} LINES" + if (lines.any { it.words.isNotEmpty() }) " · WORDS" else "")
     fun title() = curTitle
     fun artist() = curArtist
-    fun sizeChanged(id: Int) { sizes.remove(id); redraw() }
+    fun sizeChanged(id: Int) { sizes.remove(id); artSig.remove(id); redraw() }
+    fun isPlaying() = playing()
+
+    /** Artwork widget: 0 = cover, 1 = lyrics. Saved, and every artwork widget redraws. */
+    fun setArtMode(m: Int) { Prefs.setArtMode(this, m); artSig.clear(); redraw() }
+    /** a look setting of the artwork widget changed (e.g. corner radius): redraw it */
+    fun artChanged() { artSig.clear(); redraw() }
+
+    // frames for the swipe overlay, drawn at the overlay's own size (one surface per side so both can slide at once)
+    private val overlaySurf = arrayOf(Surface(), Surface())
+    fun artFrame(mode: Int, w: Int, h: Int, d: Float): android.graphics.Bitmap {
+        val s = overlaySurf[mode.coerceIn(0, 1)]
+        return if (mode == 1) Renderers.lyrics(this, s, w, h, d, lines, position(), status, st = LyricsStyle.from(this, playing()).copy(controls = false, radius = Prefs.artRadius(this).toFloat()))
+        else Renderers.art(this, s, w, h, d, art, curTitle, curArtist, playing(), Prefs.lyrRed(this))
+    }
 
     private var shownIdx = -2
     private var prevIdx = -2
@@ -169,7 +223,9 @@ class MediaListenerService : NotificationListenerService() {
         main.removeCallbacks(tick)
         val mgr = AppWidgetManager.getInstance(this)
         val ids = mgr.getAppWidgetIds(ComponentName(this, LyricsWidgetProvider::class.java))
-        if (ids.isEmpty() || !screenOn) return
+        val artIds = ArtWidgetProvider.ids(this)
+        val artLyrics = artIds.isNotEmpty() && Prefs.artMode(this) == 1
+        if ((ids.isEmpty() && artIds.isEmpty()) || !screenOn) return
         val pos = position()
         val idx = LrcParser.index(lines, pos)
         val now = SystemClock.elapsedRealtime()
@@ -183,10 +239,33 @@ class MediaListenerService : NotificationListenerService() {
         val st = LyricsStyle.from(this, playing())
         for (id in ids) {
             val (w, h, d) = sizes.getOrPut(id) { Renderers.sizePx(this, id, 250, 180) }
-            val bmp = Renderers.lyrics(this, surfaces.getOrPut(id) { Surface() }, w, h, d, lines, pos, status, prevIdx, t, st)
-            Renderers.push(this, bmp, intArrayOf(id), R.layout.widget_lyrics) { LyricsWidgetProvider.wire(this, it, st.controls) }
+            // plain lyrics are only spread evenly over the song, so their times mean nothing to seek to
+            val seek = st.seek && status == null && lines.isNotEmpty()
+            val bmp = Renderers.lyrics(this, surfaces.getOrPut(id) { Surface() }, w, h, d, lines, pos, status, prevIdx, t, st,
+                if (seek) hits else null)
+            if (!seek) hits.clear()
+            Renderers.push(this, bmp, intArrayOf(id), R.layout.widget_lyrics) {
+                LyricsWidgetProvider.wire(this, it, st.controls, hits, lines, d, trackKey.hashCode())
+            }
+        }
+        val red = Prefs.lyrRed(this)
+        for (id in artIds) {
+            val (w, h, d) = sizes.getOrPut(id) { Renderers.sizePx(this, id, 160, 160) }
+            val surf = surfaces.getOrPut(id) { Surface() }
+            val bmp = if (artLyrics) {
+                artSig.remove(id)
+                Renderers.lyrics(this, surf, w, h, d, lines, pos, status, prevIdx, t, st.copy(controls = false, radius = Prefs.artRadius(this).toFloat()))
+            } else {
+                val sig = "$trackVer|${playing()}|$w|$h|$red"
+                if (artSig[id] == sig) continue
+                artSig[id] = sig
+                Renderers.art(this, surf, w, h, d, art, curTitle, curArtist, playing(), red)
+            }
+            val eq = !artLyrics && playing() && curTitle.isNotEmpty()
+            Renderers.push(this, bmp, intArrayOf(id), R.layout.widget_art) { ArtWidgetProvider.wire(this, it, eq) }
         }
         if (!playing()) return
+        if (ids.isEmpty() && !artLyrics) return   // cover mode is static: no ticking
         if (t < 1f) { main.postDelayed(tick, 40); return }
         // karaoke lines need a fast tick for the word fill
         if (lines.getOrNull(idx)?.words?.isNotEmpty() == true) { main.postDelayed(tick, 120); return }

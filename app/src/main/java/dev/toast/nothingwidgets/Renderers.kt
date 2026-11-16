@@ -23,11 +23,16 @@ class Surface {
     var changed = true; internal set
 }
 
-data class LyricsStyle(val size: Int = 1, val red: Boolean = true, val context: Boolean = true, val controls: Boolean = true, val playing: Boolean = false) {
+data class LyricsStyle(val size: Int = 1, val red: Boolean = true, val context: Boolean = true, val controls: Boolean = true,
+                       val playing: Boolean = false, val seek: Boolean = true, val radius: Float = 28f) {
     companion object {
-        fun from(c: Context, playing: Boolean) = LyricsStyle(Prefs.lyrSize(c), Prefs.lyrRed(c), Prefs.lyrContext(c), Prefs.lyrControls(c), playing)
+        fun from(c: Context, playing: Boolean) =
+            LyricsStyle(Prefs.lyrSize(c), Prefs.lyrRed(c), Prefs.lyrContext(c), Prefs.lyrControls(c), playing, Prefs.lyrSeek(c))
     }
 }
+
+/** Where a lyric line was drawn (px, top to bottom), so the widget can put a tap-to-seek zone over it. */
+class LineHit(val line: Int, var top: Float, var bottom: Float)
 
 object Renderers {
     const val RED = 0xFFFF2D2D.toInt()
@@ -67,11 +72,11 @@ object Renderers {
     }
 
     // 5x5 dot glyphs for the widget controls
-    private val G_PREV = arrayOf("x...x", "x..xx", "x.xxx", "x..xx", "x...x")
-    private val G_NEXT = arrayOf("x...x", "xx..x", "xxx.x", "xx..x", "x...x")
-    private val G_PLAY = arrayOf("x....", "xxx..", "xxxxx", "xxx..", "x....")
-    private val G_PAUSE = arrayOf("xx.xx", "xx.xx", "xx.xx", "xx.xx", "xx.xx")
-    private fun glyph(cv: Canvas, g: Array<String>, cx: Float, cy: Float, d: Float, p: Paint) {
+    internal val G_PREV = arrayOf("x...x", "x..xx", "x.xxx", "x..xx", "x...x")
+    internal val G_NEXT = arrayOf("x...x", "xx..x", "xxx.x", "xx..x", "x...x")
+    internal val G_PLAY = arrayOf("x....", "xxx..", "xxxxx", "xxx..", "x....")
+    internal val G_PAUSE = arrayOf("xx.xx", "xx.xx", "xx.xx", "xx.xx", "xx.xx")
+    internal fun glyph(cv: Canvas, g: Array<String>, cx: Float, cy: Float, d: Float, p: Paint) {
         val s = 3.2f * d
         for (r in 0 until 5) for (c in 0 until 5) if (g[r][c] == 'x')
             cv.drawCircle(cx + (c - 2) * s, cy + (r - 2) * s, 1.15f * d, p)
@@ -82,14 +87,15 @@ object Renderers {
      * prev/t drive the line-change slide (t 0..1), [pos] already includes the per-song latency.
      */
     fun lyrics(ctx: Context, surf: Surface, w: Int, h: Int, d: Float, lines: List<LrcLine>, pos: Double, status: String?,
-               prev: Int = -2, t: Float = 1f, st: LyricsStyle = LyricsStyle()): Bitmap {
+               prev: Int = -2, t: Float = 1f, st: LyricsStyle = LyricsStyle(), hits: MutableList<LineHit>? = null): Bitmap {
+        hits?.clear()
         fonts(ctx)
         val cv = surf.begin(w, h)
         val accent = if (st.red) RED else WHITE
         val p = lp
         p.reset(); p.isAntiAlias = true
         p.color = Color.BLACK
-        cv.drawRoundRect(0f, 0f, w.toFloat(), h.toFloat(), 28 * d, 28 * d, p)
+        cv.drawRoundRect(0f, 0f, w.toFloat(), h.toFloat(), st.radius * d, st.radius * d, p)
         val pad = 16 * d
         // header
         p.typeface = reg; p.textSize = 10 * d; p.letterSpacing = 0.15f
@@ -171,6 +177,8 @@ object Renderers {
             }
             p.color = accent
             cv.drawCircle(pad + 4 * d, y0 + size * d * 0.6f, 3.5f * d, p)
+            val rec = if (live) hits else null
+            rec?.add(LineHit(i, y0 - 2 * d, y0 + curH + 2 * d))
             if (st.context) {
                 val csize = maxOf(10f, size * 0.55f)
                 p.typeface = reg; p.textSize = csize * d; p.color = DIM
@@ -178,8 +186,16 @@ object Renderers {
                 val fit = ((area - curH) / 2 / cl).toInt().coerceIn(0, 2)
                 for (off in 1..fit) {
                     val before = i - off; val after = i + off
-                    if (before in lines.indices) cv.drawText(ell(lines[before].s.ifEmpty { "♪" }, p, maxW), pad, y0 - cl * (off - 1) - csize * .5f * d, p)
-                    if (after in lines.indices) cv.drawText(ell(lines[after].s.ifEmpty { "♪" }, p, maxW), pad, y0 + curH + cl * (off - 1) + csize * 1.1f * d, p)
+                    val yb = y0 - cl * (off - 1) - csize * .5f * d
+                    val ya = y0 + curH + cl * (off - 1) + csize * 1.1f * d
+                    if (before in lines.indices) {
+                        cv.drawText(ell(lines[before].s.ifEmpty { "♪" }, p, maxW), pad, yb, p)
+                        rec?.add(LineHit(before, yb - csize * 1.2f * d, yb + csize * .5f * d))
+                    }
+                    if (after in lines.indices) {
+                        cv.drawText(ell(lines[after].s.ifEmpty { "♪" }, p, maxW), pad, ya, p)
+                        rec?.add(LineHit(after, ya - csize * 1.2f * d, ya + csize * .5f * d))
+                    }
                 }
             }
             cv.restoreToCount(sc)
@@ -190,6 +206,60 @@ object Renderers {
             block(prev, -e * sh, ((1f - e) * 255).toInt(), false)
             block(idx, (1f - e) * sh, (e * 255).toInt(), true)
         } else block(idx, 0f, 255, true)
+        if (hits != null && hits.isNotEmpty()) {
+            // close the gaps so the zones tile the lyrics area: easier to hit than the bare text rows
+            hits.sortBy { it.top }
+            for (k in 1 until hits.size) { val m = (hits[k - 1].bottom + hits[k].top) / 2; hits[k - 1].bottom = m; hits[k].top = m }
+            hits.first().top = top - 6 * d; hits.last().bottom = bottom + 6 * d
+        }
+        return surf.bmp!!
+    }
+
+    private val ap = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+    private val artSrc = Rect()
+    private val artDst = RectF()
+    private val artClip = Path()
+
+    /**
+     * Artwork widget, art side: the cover centre-cropped to a rounded card. Paused = dimmed with a dot ▶.
+     * No cover: title/artist in Doto on black. The playing "eq" is not drawn here: it's an animated view in
+     * widget_art.xml the launcher runs. Main thread only.
+     */
+    fun art(ctx: Context, surf: Surface, w: Int, h: Int, d: Float, art: Bitmap?, title: String, artist: String, playing: Boolean, red: Boolean,
+            radiusDp: Float = Prefs.artRadius(ctx).toFloat()): Bitmap {
+        fonts(ctx)
+        val cv = surf.begin(w, h)
+        val p = ap
+        p.reset(); p.isAntiAlias = true; p.isFilterBitmap = true
+        val r = radiusDp * d
+        artClip.rewind(); artClip.addRoundRect(0f, 0f, w.toFloat(), h.toFloat(), r, r, Path.Direction.CW)
+        cv.save(); cv.clipPath(artClip)
+        cv.drawColor(Color.BLACK)
+        if (art != null && !art.isRecycled) {
+            // centre-crop
+            val s = maxOf(w / art.width.toFloat(), h / art.height.toFloat())
+            val sw = (w / s).toInt().coerceAtMost(art.width); val sh = (h / s).toInt().coerceAtMost(art.height)
+            artSrc.set((art.width - sw) / 2, (art.height - sh) / 2, (art.width + sw) / 2, (art.height + sh) / 2)
+            artDst.set(0f, 0f, w.toFloat(), h.toFloat())
+            cv.drawBitmap(art, artSrc, artDst, p)
+        } else {
+            val pad = 16 * d
+            p.color = if (red) RED else WHITE; cv.drawCircle(pad + 3 * d, pad + 4.5f * d, 3 * d, p)
+            p.typeface = bold; p.color = WHITE; p.textSize = 22 * d
+            val tl = wrap(p, title.ifEmpty { "NO MUSIC" }, w - 2 * pad).take(3)
+            var y = h - pad - (if (artist.isNotEmpty()) 18 * d else 0f) - (tl.size - 1) * 24 * d
+            for (l in tl) { cv.drawText(ell(l, p, w - 2 * pad), pad, y, p); y += 24 * d }
+            if (artist.isNotEmpty()) {
+                p.typeface = reg; p.textSize = 12 * d; p.color = DIM
+                cv.drawText(ell(artist, p, w - 2 * pad), pad, h - pad, p)
+            }
+        }
+        if (title.isNotEmpty() && !playing) {
+            cv.drawColor(0x8C000000.toInt())
+            p.color = WHITE
+            glyph(cv, G_PLAY, w / 2f + 2 * d, h / 2f, d * 2.2f, p)
+        }
+        cv.restore()
         return surf.bmp!!
     }
 
