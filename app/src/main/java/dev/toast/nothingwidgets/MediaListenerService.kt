@@ -22,6 +22,11 @@ class MediaListenerService : NotificationListenerService() {
     private var trackKey = ""
     private var status: String? = "NO MUSIC"
     private var screenOn = true
+    private var curTitle = ""
+    private var curArtist = ""
+    private var curDur = 0L
+    @Volatile var latencyMs = 0
+        private set
 
     private val cb = object : MediaController.Callback() {
         override fun onPlaybackStateChanged(state: PlaybackState?) { redraw() }
@@ -69,11 +74,13 @@ class MediaListenerService : NotificationListenerService() {
         val md = controller?.metadata
         val title = md?.getString(MediaMetadata.METADATA_KEY_TITLE) ?: ""
         val artist = md?.getString(MediaMetadata.METADATA_KEY_ARTIST) ?: md?.getString(MediaMetadata.METADATA_KEY_ALBUM_ARTIST) ?: ""
-        if (title.isEmpty()) { trackKey = ""; lines = emptyList(); status = "NO MUSIC"; return }
+        if (title.isEmpty()) { trackKey = ""; lines = emptyList(); status = "NO MUSIC"; latencyMs = 0; return }
         val k = "$title|$artist"
         if (k == trackKey) return
         trackKey = k; lines = emptyList(); status = "SEARCHING…"
         val dur = (md?.getLong(MediaMetadata.METADATA_KEY_DURATION) ?: 0L) / 1000
+        curTitle = title; curArtist = artist; curDur = dur
+        latencyMs = LatencyStore.get(this, k)   // each song keeps its own saved latency
         io.execute {
             val lrc = LrclibClient.fetch(this, title, artist, dur)
             main.post {
@@ -91,8 +98,25 @@ class MediaListenerService : NotificationListenerService() {
         if (s.state == PlaybackState.STATE_PLAYING) {
             p += (SystemClock.elapsedRealtime() - s.lastPositionUpdateTime) * s.playbackSpeed
         }
-        return p / 1000.0
+        return p / 1000.0 + latencyMs / 1000.0
     }
+
+    // ---- used by the settings screen ----
+    fun refreshLyrics() { LrclibClient.clear(this, curTitle, curArtist); trackKey = ""; shownIdx = -2; loadTrack(); redraw() }
+
+    fun findCandidates(cb: (List<Candidate>?) -> Unit) {
+        val t = curTitle; val a = curArtist
+        io.execute { val r = LrclibClient.search(t, a); main.post { cb(r) } }
+    }
+
+    fun choose(c: Candidate) {
+        LrclibClient.saveChoice(this, curTitle, curArtist, c.synced)
+        lines = LrcParser.parse(c.synced); status = if (lines.isEmpty()) "NO LYRICS" else null
+        shownIdx = -2; redraw()
+    }
+
+    fun setLatency(ms: Int) { latencyMs = ms; LatencyStore.set(this, trackKey, ms); shownIdx = -2; redraw() }
+    fun hasTrack() = trackKey.isNotEmpty()
 
     private var shownIdx = -2
     private var prevIdx = -2

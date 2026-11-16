@@ -13,6 +13,25 @@ import android.widget.*
 
 class MainActivity : Activity() {
     private lateinit var status: TextView
+    private lateinit var lyricsInfo: TextView
+    private lateinit var latLabel: TextView
+    private lateinit var latBar: SeekBar
+
+    private fun toast(t: String) = Toast.makeText(this, t, Toast.LENGTH_SHORT).show()
+    private fun latText(ms: Int) = "Latency (this song): " + (if (ms > 0) "+" else "") + ms + " ms   [+ = lyrics earlier, − = later]"
+
+    private fun listFinds() {
+        val s = MediaListenerService.instance
+        if (s == null || !s.hasTrack()) { toast("Play a song first"); return }
+        toast("Searching LRCLIB…")
+        s.findCandidates { list ->
+            if (list == null) toast("Offline / LRCLIB unreachable")
+            else if (list.isEmpty()) toast("No synced lyrics found")
+            else android.app.AlertDialog.Builder(this).setTitle("Pick lyrics")
+                .setItems(list.map { it.label() }.toTypedArray()) { _, i -> s.choose(list[i]); toast("Using: ${list[i].track}") }
+                .setNegativeButton("Cancel", null).show()
+        }
+    }
 
     override fun onCreate(b: Bundle?) {
         super.onCreate(b)
@@ -28,6 +47,31 @@ class MainActivity : Activity() {
         root.addView(btn("2. Audio permission + notifications (visualizer)") {
             requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.POST_NOTIFICATIONS), 1)
         })
+        root.addView(tv("\nLYRICS", 14f))
+        lyricsInfo = tv("", 12f, Renderers.DIM)
+        root.addView(lyricsInfo)
+        root.addView(btn("Refresh lyrics") {
+            val s = MediaListenerService.instance
+            if (s == null || !s.hasTrack()) toast("Play a song first (and allow notification access)") else { s.refreshLyrics(); toast("Searching again…") }
+        })
+        root.addView(btn("List lyric finds") { listFinds() })
+        latLabel = tv("", 12f)
+        root.addView(latLabel)
+        latBar = SeekBar(this).apply {
+            max = 200; progress = 100
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(s: SeekBar, p: Int, u: Boolean) {
+                    val ms = (p - 100) * 50
+                    latLabel.text = latText(ms)
+                    if (u) MediaListenerService.instance?.setLatency(ms)
+                }
+                override fun onStartTrackingTouch(s: SeekBar) {}
+                override fun onStopTrackingTouch(s: SeekBar) {}
+            })
+        }
+        root.addView(latBar)
+        root.addView(btn("Reset latency (this song)") { latBar.progress = 100; MediaListenerService.instance?.setLatency(0) })
+        root.addView(tv("\nVISUALIZER", 14f))
         root.addView(btn("3. Start / stop visualizer") { toggleViz() })
         root.addView(Switch(this).apply {
             text = "Red visualizer"; typeface = tf; setTextColor(Renderers.WHITE); isChecked = Prefs.red(this@MainActivity)
@@ -63,6 +107,10 @@ class MainActivity : Activity() {
     override fun onRequestPermissionsResult(r: Int, p: Array<out String>, g: IntArray) { refresh() }
 
     private fun refresh() {
+        val sv = MediaListenerService.instance
+        val ms = sv?.latencyMs ?: 0
+        if (::latBar.isInitialized) { latBar.progress = ms / 50 + 100; latLabel.text = latText(ms); latBar.isEnabled = sv?.hasTrack() == true }
+        if (::lyricsInfo.isInitialized) lyricsInfo.text = "Now playing: " + (MediaListenerService.nowPlaying().ifEmpty { "-" })
         val notif = Settings.Secure.getString(contentResolver, "enabled_notification_listeners")?.contains(packageName) == true
         val mic = checkSelfPermission(Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED
         val np = MediaListenerService.nowPlaying()
