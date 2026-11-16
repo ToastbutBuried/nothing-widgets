@@ -2,141 +2,306 @@ package dev.toast.nothingwidgets
 
 import android.Manifest
 import android.app.Activity
+import android.app.AlertDialog
+import android.appwidget.AppWidgetManager
 import android.content.ComponentName
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.RippleDrawable
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
+import android.text.TextUtils
 import android.view.Gravity
+import android.view.View
+import android.view.ViewGroup.LayoutParams.MATCH_PARENT
+import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.widget.*
 
+/** Settings screen, styled like the widgets: black cards, dot-matrix headings, pill controls. */
 class MainActivity : Activity() {
-    private lateinit var status: TextView
-    private lateinit var lyricsInfo: TextView
-    private lateinit var latLabel: TextView
+    private val LABEL = 0xFF8A8A8A.toInt()
+    private val ui = Handler(Looper.getMainLooper())
+    private lateinit var dotoB: Typeface
+    private lateinit var doto: Typeface
+    private val mono = Typeface.create("monospace", Typeface.NORMAL)
+
+    // live views
+    private lateinit var notifPill: TextView
+    private lateinit var audioPill: TextView
+    private lateinit var setupHint: TextView
+    private lateinit var lyrState: TextView
+    private lateinit var trackTitle: TextView
+    private lateinit var trackArtist: TextView
+    private lateinit var latValue: TextView
     private lateinit var latBar: SeekBar
+    private lateinit var lyricControls: List<View>
+    private lateinit var vizState: TextView
+    private lateinit var vizButton: TextView
+    private lateinit var sensValue: TextView
+    private lateinit var preview: PreviewView
+    private var dragging = false
 
-    private fun toast(t: String) = Toast.makeText(this, t, Toast.LENGTH_SHORT).show()
-    private fun latText(ms: Int) = "Latency (this song): " + (if (ms > 0) "+" else "") + ms + " ms   [+ = lyrics earlier, − = later]"
+    private val tick = object : Runnable { override fun run() { refresh(); ui.postDelayed(this, 1000) } }
 
-    private fun listFinds() {
-        val s = MediaListenerService.instance
-        if (s == null || !s.hasTrack()) { toast("Play a song first"); return }
-        toast("Searching LRCLIB…")
-        s.findCandidates { list ->
-            if (list == null) toast("Offline / LRCLIB unreachable")
-            else if (list.isEmpty()) toast("No synced lyrics found")
-            else android.app.AlertDialog.Builder(this).setTitle("Pick lyrics")
-                .setItems(list.map { it.label() }.toTypedArray()) { _, i -> s.choose(list[i]); toast("Using: ${list[i].track}") }
-                .setNegativeButton("Cancel", null).show()
-        }
+    // ---------- small view kit ----------
+    private fun dp(v: Number) = (v.toFloat() * resources.displayMetrics.density).toInt()
+    private fun shape(fill: Int, stroke: Int = 0, radius: Float = 99f) = GradientDrawable().apply {
+        setColor(fill); cornerRadius = dp(radius).toFloat(); if (stroke != 0) setStroke(dp(1), stroke)
+    }
+    private fun ripple(bg: GradientDrawable) = RippleDrawable(ColorStateList.valueOf(0x33FFFFFF), bg, null)
+
+    private fun text(t: String, size: Float, color: Int, face: Typeface = mono) = TextView(this).apply {
+        text = t; textSize = size; setTextColor(color); typeface = face; includeFontPadding = false
     }
 
-    override fun onCreate(b: Bundle?) {
-        super.onCreate(b)
-        val tf = resources.getFont(R.font.doto_bold)
-        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(Color.BLACK); setPadding(48, 96, 48, 48) }
-        fun tv(t: String, size: Float, c: Int = Renderers.WHITE) = TextView(this).apply { text = t; textSize = size; setTextColor(c); typeface = tf }
-        fun btn(t: String, f: () -> Unit) = Button(this).apply { text = t; typeface = tf; setOnClickListener { f() } }
-        root.addView(tv("● NOTHING WIDGETS", 20f))
-        val preview = PreviewView(this)
-        status = tv("", 14f, Renderers.DIM).apply { setPadding(0, 32, 0, 32) }
-        root.addView(status)
-        root.addView(btn("1. Notification access (lyrics)") { startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) })
-        root.addView(btn("2. Audio permission + notifications (visualizer)") {
-            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.POST_NOTIFICATIONS), 1)
-        })
-        root.addView(tv("\nLYRICS", 14f))
-        lyricsInfo = tv("", 12f, Renderers.DIM)
-        root.addView(lyricsInfo)
-        root.addView(btn("Refresh lyrics") {
-            val s = MediaListenerService.instance
-            if (s == null || !s.hasTrack()) toast("Play a song first (and allow notification access)") else { s.refreshLyrics(); toast("Searching again…") }
-        })
-        root.addView(btn("List lyric finds") { listFinds() })
-        latLabel = tv("", 12f)
-        root.addView(latLabel)
-        latBar = SeekBar(this).apply {
-            max = 200; progress = 100
-            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(s: SeekBar, p: Int, u: Boolean) {
-                    val ms = (p - 100) * 50
-                    latLabel.text = latText(ms)
-                    if (u) MediaListenerService.instance?.setLatency(ms)
-                }
-                override fun onStartTrackingTouch(s: SeekBar) {}
-                override fun onStopTrackingTouch(s: SeekBar) {}
+    private fun label(t: String) = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+        addView(View(context).apply { background = shape(Renderers.RED) }, LinearLayout.LayoutParams(dp(6), dp(6)).apply { rightMargin = dp(8) })
+        addView(text(t.uppercase(), 11f, LABEL, dotoB).apply { letterSpacing = 0.18f })
+    }
+
+    private fun header(t: String, right: TextView) = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+        addView(label(t), LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+        addView(right.apply { letterSpacing = 0.12f })
+    }
+
+    private fun card() = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        background = shape(0xFF0B0B0B.toInt(), 0xFF222222.toInt(), 28f)
+        setPadding(dp(20), dp(18), dp(20), dp(20))
+    }
+
+    private fun pill(t: String, primary: Boolean = false, onClick: () -> Unit) = TextView(this).apply {
+        text = t.uppercase(); textSize = 12f; typeface = dotoB; letterSpacing = 0.1f; gravity = Gravity.CENTER
+        setPadding(dp(16), dp(11), dp(16), dp(11))
+        stylePill(this, primary)
+        setOnClickListener { onClick() }
+    }
+
+    private fun stylePill(v: TextView, active: Boolean, activeColor: Int = Renderers.RED) {
+        v.background = ripple(if (active) shape(activeColor) else shape(Color.BLACK, 0xFF444444.toInt()))
+        v.setTextColor(if (active) Color.BLACK else Renderers.WHITE)
+    }
+
+    private fun row(vararg views: View, gap: Int = 8) = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+        views.forEachIndexed { i, v -> addView(v, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { if (i > 0) leftMargin = dp(gap) }) }
+    }
+
+    /** Segmented control: one pill per option, the selected one filled. */
+    private fun segmented(options: List<String>, selected: Int, color: Int = Renderers.WHITE, onSelect: (Int) -> Unit): LinearLayout {
+        val pills = ArrayList<TextView>()
+        options.forEachIndexed { i, o ->
+            pills.add(pill(o) {
+                pills.forEachIndexed { k, p -> stylePill(p, k == i, color) }
+                onSelect(i)
             })
         }
-        root.addView(latBar)
-        root.addView(btn("Reset latency (this song)") { latBar.progress = 100; MediaListenerService.instance?.setLatency(0) })
-        root.addView(tv("\nVISUALIZER", 14f))
-        root.addView(btn("3. Start / stop visualizer") { toggleViz() })
-        root.addView(Switch(this).apply {
-            text = "Red visualizer"; typeface = tf; setTextColor(Renderers.WHITE); isChecked = Prefs.red(this@MainActivity)
-            setOnCheckedChangeListener { _, v -> Prefs.setRed(this@MainActivity, v); preview.invalidate(); sendBroadcast(Intent(this@MainActivity, VizWidgetProvider::class.java).setAction("android.appwidget.action.APPWIDGET_UPDATE").putExtra("appWidgetIds", android.appwidget.AppWidgetManager.getInstance(this@MainActivity).getAppWidgetIds(ComponentName(this@MainActivity, VizWidgetProvider::class.java)))) }
+        pills.forEachIndexed { k, p -> stylePill(p, k == selected, color) }
+        return row(*pills.toTypedArray(), gap = 6)
+    }
+
+    private fun slider(max: Int, value: Int, onChange: (Int, Boolean) -> Unit) = SeekBar(this).apply {
+        this.max = max; progress = value
+        progressTintList = ColorStateList.valueOf(Renderers.RED)
+        progressBackgroundTintList = ColorStateList.valueOf(0xFF333333.toInt())
+        thumbTintList = ColorStateList.valueOf(Renderers.WHITE)
+        setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(s: SeekBar, p: Int, u: Boolean) = onChange(p, u)
+            override fun onStartTrackingTouch(s: SeekBar) { dragging = true }
+            override fun onStopTrackingTouch(s: SeekBar) { dragging = false }
+        })
+    }
+
+    private fun space(h: Int) = View(this).apply { layoutParams = LinearLayout.LayoutParams(1, dp(h)) }
+
+    // ---------- screen ----------
+    override fun onCreate(b: Bundle?) {
+        super.onCreate(b)
+        dotoB = resources.getFont(R.font.doto_bold); doto = resources.getFont(R.font.doto_regular)
+
+        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(16), dp(28), dp(16), dp(32)) }
+        fun add(v: View, gapAfter: Int = 14) { root.addView(v, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)); root.addView(space(gapAfter)) }
+
+        // header
+        add(LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL; setPadding(dp(4), dp(8), dp(4), 0)
+            addView(text("NOTHING", 34f, Renderers.WHITE, dotoB))
+            addView(text("WIDGETS", 34f, Renderers.RED, dotoB))
+            addView(space(8))
+            addView(text("lyrics · visualizer", 12f, Renderers.DIM))
+        }, 20)
+
+        // setup
+        notifPill = pill("…") { startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) }
+        audioPill = pill("…") { requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.POST_NOTIFICATIONS), 1) }
+        setupHint = text("", 11f, Renderers.DIM)
+        add(card().apply {
+            addView(label("Setup")); addView(space(14))
+            addView(permRow("Notification access", "reads what's playing", notifPill)); addView(space(10))
+            addView(permRow("Audio", "taps the phone's output", audioPill)); addView(space(10))
+            addView(setupHint)
         })
 
-        root.addView(preview, LinearLayout.LayoutParams(-1, 700))
-        root.addView(Switch(this).apply {
-            text = "Bars style"; typeface = tf; setTextColor(Renderers.WHITE); isChecked = Prefs.bars(this@MainActivity)
-            setOnCheckedChangeListener { _, v -> Prefs.setBars(this@MainActivity, v); preview.invalidate() }
+        // lyrics
+        lyrState = text("", 11f, LABEL, dotoB)
+        trackTitle = text("-", 22f, Renderers.WHITE, dotoB).apply { maxLines = 2; ellipsize = TextUtils.TruncateAt.END; setLineSpacing(0f, 1.1f) }
+        trackArtist = text("", 13f, 0xFF9A9A9A.toInt()).apply { maxLines = 1; ellipsize = TextUtils.TruncateAt.END }
+        latValue = text("0 ms", 26f, Renderers.WHITE, dotoB)
+        latBar = slider(200, 100) { p, user -> val ms = (p - 100) * 50; latValue.text = latText(ms); if (user) setLatency(ms) }
+        val minus = pill("−") { nudgeLatency(-50) }; val plus = pill("+") { nudgeLatency(50) }
+        val refreshBtn = pill("Refresh") {
+            val s = svc() ?: return@pill
+            s.refreshLyrics(); toast("Searching again…")
+        }
+        val pickBtn = pill("Pick lyrics", primary = true) { listFinds() }
+        val resetBtn = pill("Reset") { latBar.progress = 100; setLatency(0) }
+        lyricControls = listOf(refreshBtn, pickBtn, minus, plus, resetBtn, latBar)
+        add(card().apply {
+            addView(header("Lyrics", lyrState)); addView(space(16))
+            addView(text("NOW PLAYING", 10f, LABEL, dotoB).apply { letterSpacing = .18f }); addView(space(6))
+            addView(trackTitle); addView(space(4)); addView(trackArtist); addView(space(16))
+            addView(row(refreshBtn, pickBtn)); addView(space(22))
+            addView(LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL; gravity = Gravity.BOTTOM
+                addView(LinearLayout(context).apply {
+                    orientation = LinearLayout.VERTICAL
+                    addView(text("LATENCY · THIS SONG", 10f, LABEL, dotoB).apply { letterSpacing = .18f }); addView(space(6))
+                    addView(latValue)
+                }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+                addView(resetBtn)
+            }); addView(space(10))
+            addView(LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+                addView(minus, LinearLayout.LayoutParams(dp(48), dp(40)))
+                addView(latBar, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+                addView(plus, LinearLayout.LayoutParams(dp(48), dp(40)))
+            }); addView(space(8))
+            addView(text("+ shows lyrics earlier, − later. Saved per song and reapplied when it plays again.", 11f, Renderers.DIM))
         })
-        root.addView(tv("Sensitivity", 14f).apply { setPadding(0, 24, 0, 0) })
-        root.addView(SeekBar(this).apply {
-            max = 100; progress = ((Prefs.gain(this@MainActivity) - 0.5f) / 3.5f * 100).toInt()
-            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(s: SeekBar, p: Int, u: Boolean) { Prefs.setGain(this@MainActivity, 0.5f + p / 100f * 3.5f) }
-                override fun onStartTrackingTouch(s: SeekBar) {}
-                override fun onStopTrackingTouch(s: SeekBar) {}
-            })
+
+        // visualizer
+        vizState = text("", 11f, LABEL, dotoB)
+        preview = PreviewView(this)
+        sensValue = text("", 12f, Renderers.WHITE, dotoB)
+        vizButton = pill("Start", primary = true) { toggleViz() }
+        add(card().apply {
+            addView(header("Visualizer", vizState)); addView(space(16))
+            addView(preview, LinearLayout.LayoutParams(MATCH_PARENT, dp(240))); addView(space(18))
+            addView(text("STYLE", 10f, LABEL, dotoB).apply { letterSpacing = .18f }); addView(space(8))
+            addView(segmented(listOf("Dots", "Bars"), if (Prefs.bars(context)) 1 else 0) { Prefs.setBars(context, it == 1); widgetsChanged() }); addView(space(14))
+            addView(text("COLOUR", 10f, LABEL, dotoB).apply { letterSpacing = .18f }); addView(space(8))
+            addView(segmented(listOf("White", "Red"), if (Prefs.red(context)) 1 else 0) { Prefs.setRed(context, it == 1); widgetsChanged() }); addView(space(16))
+            addView(header("Sensitivity", sensValue)); addView(space(4))
+            addView(slider(100, ((Prefs.gain(context) - 0.5f) / 3.5f * 100).toInt()) { p, _ ->
+                val g = 0.5f + p / 100f * 3.5f; Prefs.setGain(context, g); sensValue.text = "%.1f×".format(g)
+            }); addView(space(16))
+            addView(vizButton, LinearLayout.LayoutParams(MATCH_PARENT, dp(48)))
         })
-        root.addView(tv("\nLong-press the home screen > Widgets > add Lyrics and Visualizer. Tap the visualizer widget to start or stop it.", 12f, Renderers.DIM))
+        sensValue.text = "%.1f×".format(Prefs.gain(this))
+
+        // footer
+        add(text("Add the widgets: long-press the home screen › Widgets › Nothing Widgets. Lyrics resizes freely; the visualizer is 2×2, tap it to start or stop.",
+            11f, Renderers.DIM).apply { setPadding(dp(4), 0, dp(4), 0); setLineSpacing(0f, 1.3f) }, 0)
+
+        setContentView(ScrollView(this).apply {
+            setBackgroundColor(Color.BLACK); isVerticalScrollBarEnabled = false; clipToPadding = true; addView(root)
+            // targetSdk 35 draws edge-to-edge: keep content clear of the status and navigation bars
+            setOnApplyWindowInsetsListener { v, insets ->
+                val bars = insets.getInsets(android.view.WindowInsets.Type.systemBars())
+                v.setPadding(0, bars.top, 0, bars.bottom); insets
+            }
+        })
         if (intent.getBooleanExtra("viz", false)) toggleViz()
-        setContentView(ScrollView(this).apply { setBackgroundColor(Color.BLACK); addView(root) })
+    }
+
+    private fun permRow(name: String, sub: String, pill: TextView) = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+        addView(LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(text(name, 14f, Renderers.WHITE)); addView(space(3)); addView(text(sub, 11f, Renderers.DIM))
+        }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+        addView(pill, LinearLayout.LayoutParams(dp(104), dp(40)))
+    }
+
+    // ---------- actions ----------
+    private fun toast(t: String) = Toast.makeText(this, t, Toast.LENGTH_SHORT).show()
+    private fun latText(ms: Int) = (if (ms > 0) "+" else "") + ms + " ms"
+
+    private fun svc(): MediaListenerService? {
+        val s = MediaListenerService.instance
+        if (s == null || !s.hasTrack()) { toast("Play a song first (needs notification access)"); return null }
+        return s
+    }
+
+    private fun setLatency(ms: Int) { MediaListenerService.instance?.setLatency(ms) }
+    private fun nudgeLatency(d: Int) {
+        val ms = ((latBar.progress - 100) * 50 + d).coerceIn(-5000, 5000)
+        latBar.progress = ms / 50 + 100; setLatency(ms)
+    }
+
+    private fun listFinds() {
+        val s = svc() ?: return
+        toast("Searching LRCLIB…")
+        s.findCandidates { list ->
+            when {
+                list == null -> toast("LRCLIB unreachable")
+                list.isEmpty() -> toast("No synced lyrics found")
+                else -> AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert).setTitle("Pick lyrics")
+                    .setItems(list.map { it.label() }.toTypedArray()) { _, i -> s.choose(list[i]); toast("Using: ${list[i].track}") }
+                    .setNegativeButton("Cancel", null).show()
+            }
+        }
     }
 
     private fun toggleViz() {
         if (VisualizerService.active) startService(Intent(this, VisualizerService::class.java).setAction(VisualizerService.ACTION_STOP))
+        else if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) { toast("Grant audio first"); return }
         else startForegroundService(Intent(this, VisualizerService::class.java))
-        status.postDelayed({ refresh() }, 500)
+        ui.postDelayed({ refresh() }, 400)
     }
 
-    override fun onResume() { super.onResume(); refresh() }
-    override fun onRequestPermissionsResult(r: Int, p: Array<out String>, g: IntArray) { refresh() }
+    private fun widgetsChanged() {
+        preview.invalidate()
+        val ids = AppWidgetManager.getInstance(this).getAppWidgetIds(ComponentName(this, VizWidgetProvider::class.java))
+        if (!VisualizerService.active) sendBroadcast(Intent(this, VizWidgetProvider::class.java)
+            .setAction(AppWidgetManager.ACTION_APPWIDGET_UPDATE).putExtra(AppWidgetManager.EXTRA_APPWIDGET_IDS, ids))
+    }
+
+    // ---------- live state ----------
+    override fun onResume() { super.onResume(); ui.post(tick) }
+    override fun onPause() { ui.removeCallbacks(tick); super.onPause() }
+    override fun onRequestPermissionsResult(r: Int, p: Array<out String>, g: IntArray) = refresh()
 
     private fun refresh() {
-        val sv = MediaListenerService.instance
-        val ms = sv?.latencyMs ?: 0
-        if (::latBar.isInitialized) { latBar.progress = ms / 50 + 100; latLabel.text = latText(ms); latBar.isEnabled = sv?.hasTrack() == true }
-        if (::lyricsInfo.isInitialized) lyricsInfo.text = "Now playing: " + (MediaListenerService.nowPlaying().ifEmpty { "-" })
         val notif = Settings.Secure.getString(contentResolver, "enabled_notification_listeners")?.contains(packageName) == true
-        val mic = checkSelfPermission(Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED
-        val np = MediaListenerService.nowPlaying()
-        status.text = "Notification access: ${if (notif) "ON" else "OFF"}\nAudio permission: ${if (mic) "ON" else "OFF"}\nNow playing: ${if (np.isEmpty()) "-" else np}\nVisualizer: ${if (VisualizerService.active) "running" else "stopped"}"
-    }
-}
-
-/** Live demo of the 8x8 grid using the current colour and sensitivity. */
-class PreviewView(ctx: android.content.Context) : android.view.View(ctx) {
-    private val cava = Cava()
-    private val raw = FloatArray(8)
-    private var last = android.os.SystemClock.elapsedRealtime()
-    private var nextBeat = 0L
-    private val rnd = java.util.Random()
-    override fun onDraw(c: android.graphics.Canvas) {
-        val now = android.os.SystemClock.elapsedRealtime()
-        val dt = ((now - last) / 1000f).coerceIn(0.005f, 0.2f); last = now
-        if (now >= nextBeat) { // fake music: beats with random band energy
-            for (i in 0 until 8) raw[i] = (rnd.nextFloat() * (1f - i * .06f)).coerceIn(0f, 1f) * 0.8f
-            nextBeat = now + 160 + rnd.nextInt(260)
+        val audio = checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        for ((p, ok) in listOf(notifPill to notif, audioPill to audio)) {
+            p.text = if (ok) "● ON" else "GRANT"; p.isEnabled = !ok
+            if (ok) { p.background = shape(0xFF161616.toInt()); p.setTextColor(0xFF9A9A9A.toInt()) } else stylePill(p, true)
         }
-        for (i in 0 until 8) raw[i] *= 0.9f
-        val bars = Prefs.bars(context)
-        val lv = if (bars) cava.process(raw, dt, Prefs.gain(context) / 1.5f) else FloatArray(8) { (raw[it] * Prefs.gain(context) / 1.5f).coerceIn(0f, 1f) }
-        val s = minOf(width, height)
-        c.drawBitmap(Renderers.viz(s, s, lv, Prefs.red(context), false, bars), (width - s) / 2f, 0f, null)
-        postInvalidateOnAnimation()
+        setupHint.text = if (notif && audio) "All set." else "Greyed out? App info › ⋮ › Allow restricted settings, then try again."
+
+        val s = MediaListenerService.instance
+        val has = s?.hasTrack() == true
+        val np = MediaListenerService.nowPlaying()
+        val parts = np.split(" – ", limit = 2)
+        trackTitle.text = if (has) parts[0] else "Nothing playing"
+        trackArtist.text = if (has) parts.getOrElse(1) { "" } else if (!notif) "grant notification access first" else "start music in any app"
+        lyrState.text = if (has) s!!.lyricInfo() else "IDLE"
+        lyricControls.forEach { it.isEnabled = has; it.alpha = if (has) 1f else .35f }
+        if (!dragging) { val ms = s?.latencyMs ?: 0; latBar.progress = ms / 50 + 100; latValue.text = latText(ms) }
+
+        vizState.text = when { VisualizerService.failed -> "UNSUPPORTED"; VisualizerService.active -> "LIVE"; else -> "STOPPED" }
+        vizState.setTextColor(if (VisualizerService.active) Renderers.RED else LABEL)
+        vizButton.text = if (VisualizerService.active) "STOP" else "START"
+        stylePill(vizButton, !VisualizerService.active)
     }
 }

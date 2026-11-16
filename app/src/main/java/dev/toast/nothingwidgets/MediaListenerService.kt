@@ -117,6 +117,7 @@ class MediaListenerService : NotificationListenerService() {
 
     fun setLatency(ms: Int) { latencyMs = ms; LatencyStore.set(this, trackKey, ms); shownIdx = -2; redraw() }
     fun hasTrack() = trackKey.isNotEmpty()
+    fun lyricInfo(): String = status ?: "${lines.size} LINES"
 
     private var shownIdx = -2
     private var prevIdx = -2
