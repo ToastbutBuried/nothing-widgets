@@ -30,41 +30,36 @@ class VisualizerService : Service() {
             .setContentTitle("Visualizer listening").setContentText("Tap to stop").setContentIntent(stop).build()
         startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
         registerReceiver(screenRx, IntentFilter().apply { addAction(Intent.ACTION_SCREEN_ON); addAction(Intent.ACTION_SCREEN_OFF) })
-        running = true; active = true; refresh(true)
+        running = true; active = true; failed = false; refresh(true)
         thread = Thread { loop() }.also { it.start() }
         return START_NOT_STICKY
     }
 
     private fun loop() {
-        val rate = 44100
-        val minBuf = AudioRecord.getMinBufferSize(rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
-        val rec = try {
-            AudioRecord(MediaRecorder.AudioSource.MIC, rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, maxOf(minBuf, 2048))
-        } catch (e: SecurityException) { stopSelf(); return }
-        if (rec.state != AudioRecord.STATE_INITIALIZED) { stopSelf(); return }
-        rec.startRecording()
-        val buf = ShortArray(512)
+        // Tap the global output mix (audio session 0): reacts to what the phone plays, not the mic.
+        val vis = try {
+            android.media.audiofx.Visualizer(0).apply {
+                captureSize = android.media.audiofx.Visualizer.getCaptureSizeRange()[1]
+                enabled = true
+            }
+        } catch (e: Exception) { null }
+        if (vis == null) { failed = true; stopSelf(); return }
+        val fft = ByteArray(vis.captureSize)
         val levels = FloatArray(8)
-        var lastDraw = 0L
         val mgr = AppWidgetManager.getInstance(this)
         while (running) {
-            val n = rec.read(buf, 0, buf.size)
-            if (n <= 0) continue
-            val tgt = Fft.bands(buf)
-            for (c in 0 until 8) levels[c] += (tgt[c] - levels[c]) * .3f
-            val now = SystemClock.elapsedRealtime()
-            if (screenOn && now - lastDraw >= 66) {
-                lastDraw = now
-                val ids = mgr.getAppWidgetIds(ComponentName(this, VizWidgetProvider::class.java))
-                if (ids.isEmpty()) { stopSelf(); break }
-                val red = Prefs.red(this)
-                for (id in ids) {
-                    val (w, h) = Renderers.sizePx(this, id, 180, 180)
-                    Renderers.push(this, Renderers.viz(w, h, levels, red, false), intArrayOf(id), VizWidgetProvider.toggleIntent(this))
-                }
-            }
+            if (!screenOn) { Thread.sleep(250); continue }
+            val ok = vis.getFft(fft) == android.media.audiofx.Visualizer.SUCCESS
+            val tgt = if (ok) Fft.bandsFromFft(fft) else FloatArray(8)
+            val gain = Prefs.gain(this)
+            for (c in 0 until 8) levels[c] += ((tgt[c] * gain).coerceIn(0f, 1f) - levels[c]) * .35f
+            val ids = mgr.getAppWidgetIds(ComponentName(this, VizWidgetProvider::class.java))
+            if (ids.isEmpty()) { stopSelf(); break }
+            val bmp = Renderers.viz(360, 360, levels, Prefs.red(this), false)
+            Renderers.push(this, bmp, ids, VizWidgetProvider.toggleIntent(this))
+            Thread.sleep(66)
         }
-        rec.stop(); rec.release()
+        vis.enabled = false; vis.release()
     }
 
     override fun onDestroy() {
@@ -79,7 +74,7 @@ class VisualizerService : Service() {
         val mgr = AppWidgetManager.getInstance(this)
         val ids = mgr.getAppWidgetIds(ComponentName(this, VizWidgetProvider::class.java))
         for (id in ids) {
-            val (w, h) = Renderers.sizePx(this, id, 180, 180)
+            val w = 360; val h = 360
             Renderers.push(this, Renderers.viz(w, h, FloatArray(8), Prefs.red(this), !on), intArrayOf(id), VizWidgetProvider.toggleIntent(this))
         }
     }
@@ -87,5 +82,6 @@ class VisualizerService : Service() {
     companion object {
         const val ACTION_STOP = "dev.toast.nothingwidgets.STOP"
         @Volatile var active = false
+        @Volatile var failed = false
     }
 }

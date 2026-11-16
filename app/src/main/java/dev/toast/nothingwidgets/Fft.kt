@@ -51,4 +51,18 @@ object Fft {
         }
         return out
     }
+
+    /** 8 band levels 0..1 from Visualizer.getFft bytes (re,im pairs, index 0/1 = DC/Nyquist). */
+    fun bandsFromFft(fft: ByteArray, cols: Int = 8): FloatArray {
+        val bins = fft.size / 2
+        val out = FloatArray(cols)
+        for (c in 0 until cols) {
+            val lo = (((c.toDouble() / cols).pow(1.6)) * bins * 0.6).toInt().coerceAtLeast(1)
+            val hi = (((((c + 1).toDouble() / cols)).pow(1.6)) * bins * 0.6).toInt().coerceAtLeast(lo + 1).coerceAtMost(bins - 1)
+            var m = 0.0
+            for (i in lo..hi) { val r = fft[2 * i].toDouble(); val im = fft[2 * i + 1].toDouble(); m = max(m, sqrt(r * r + im * im)) }
+            out[c] = (20 * log10(m + 1) / 42).coerceIn(0.0, 1.0).toFloat()
+        }
+        return out
+    }
 }

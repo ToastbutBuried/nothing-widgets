@@ -12,8 +12,8 @@ class LyricsWidgetProvider : AppWidgetProvider() {
         val svc = MediaListenerService.instance
         if (svc != null) { svc.redraw(); return }
         for (id in ids) {
-            val (w, h) = Renderers.sizePx(ctx, id, 250, 180)
-            Renderers.push(ctx, Renderers.lyrics(ctx, w, h, emptyList(), 0.0, "ALLOW ACCESS"), intArrayOf(id))
+            val (w, h, d) = Renderers.sizePx(ctx, id, 250, 180)
+            Renderers.push(ctx, Renderers.lyrics(ctx, w, h, d, emptyList(), 0.0, "ALLOW ACCESS"), intArrayOf(id))
         }
     }
 }

@@ -11,64 +11,87 @@ object Renderers {
 
     private fun tf(c: Context, res: Int) = c.resources.getFont(res)
 
-    fun lyrics(ctx: Context, w: Int, h: Int, lines: List<LrcLine>, pos: Double, status: String?): Bitmap {
+    private fun wrap(p: Paint, text: String, maxW: Float): List<String> {
+        val out = ArrayList<String>(); var cur = ""
+        for (word in text.split(" ")) {
+            val t = if (cur.isEmpty()) word else "$cur $word"
+            if (p.measureText(t) <= maxW || cur.isEmpty()) cur = t else { out.add(cur); cur = word }
+        }
+        if (cur.isNotEmpty()) out.add(cur)
+        return out
+    }
+
+    private fun ell(t: String, p: Paint, maxW: Float): String {
+        if (p.measureText(t) <= maxW) return t
+        var e = t
+        while (e.isNotEmpty() && p.measureText("$e…") > maxW) e = e.dropLast(1)
+        return "$e…"
+    }
+
+    /** w,h in px; d = px per dp. Everything is laid out in dp so a bigger widget gets more lines, not just bigger text. */
+    fun lyrics(ctx: Context, w: Int, h: Int, d: Float, lines: List<LrcLine>, pos: Double, status: String?): Bitmap {
         val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         val cv = Canvas(bmp)
-        val d = w / 380f * 1.6f
         val card = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.BLACK }
         cv.drawRoundRect(0f, 0f, w.toFloat(), h.toFloat(), 28 * d, 28 * d, card)
         val reg = tf(ctx, R.font.doto_regular); val bold = tf(ctx, R.font.doto_bold)
-        val pad = 18 * d
+        val pad = 16 * d
         val p = Paint(Paint.ANTI_ALIAS_FLAG)
-        // label + time
-        p.typeface = reg; p.textSize = 11 * d; p.color = DIM; p.letterSpacing = 0.18f
-        p.color = RED; cv.drawCircle(pad + 3 * d, pad + 5 * d, 3 * d, p)
-        p.color = DIM; cv.drawText("LYRICS", pad + 12 * d, pad + 9 * d, p)
-        val m = (pos / 60).toInt(); val s = (pos % 60).toInt()
-        val tm = "$m:" + s.toString().padStart(2, '0')
-        p.textAlign = Paint.Align.RIGHT; cv.drawText(tm, w - pad, pad + 9 * d, p); p.textAlign = Paint.Align.LEFT
-        // lines
-        val top = pad + 22 * d; val barH = 6 * d
-        val bottom = h - pad - barH - 8 * d
-        val midY = (top + bottom) / 2
-        val i = LrcParser.index(lines, pos)
+        // header
+        p.typeface = reg; p.textSize = 10 * d; p.letterSpacing = 0.15f
+        val hy = pad + 8 * d
+        p.color = RED; cv.drawCircle(pad + 3 * d, hy - 3.5f * d, 3 * d, p)
+        p.color = DIM; cv.drawText("LYRICS", pad + 12 * d, hy, p)
+        val m = (pos / 60).toInt(); val sec = (pos % 60).toInt()
+        p.textAlign = Paint.Align.RIGHT; cv.drawText("$m:" + sec.toString().padStart(2, '0'), w - pad, hy, p); p.textAlign = Paint.Align.LEFT
         p.letterSpacing = 0f
-        if (lines.isEmpty()) {
-            p.typeface = bold; p.textSize = 24 * d; p.color = WHITE
-            cv.drawText(status ?: "NO LYRICS", pad, midY + 8 * d, p)
-        } else {
-            val gap = 8 * d
-            fun ell(t: String, paint: Paint, maxW: Float): String {
-                if (paint.measureText(t) <= maxW) return t
-                var e = t
-                while (e.isNotEmpty() && paint.measureText("$e…") > maxW) e = e.dropLast(1)
-                return "$e…"
-            }
-            p.typeface = reg; p.textSize = 15 * d; p.color = DIM
-            val sm = 15 * d + gap
-            val maxW = w - 2 * pad
-            for (off in intArrayOf(-2, -1, 1, 2)) {
-                val k = i + off
-                val txt = if (k in lines.indices) lines[k].s.ifEmpty { "♪" } else ""
-                val y = midY + off * sm + (if (off < 0) -6 * d else 14 * d) + 5 * d
-                cv.drawText(ell(txt, p, maxW), pad, y, p)
-            }
-            p.typeface = bold; p.textSize = 24 * d; p.color = WHITE
-            val cur = if (i >= 0) lines[i].s.ifEmpty { "♪" } else "♪"
-            val dotX = pad + 4 * d
-            val red = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = RED }
-            cv.drawCircle(dotX, midY, 4 * d, red)
-            cv.drawText(ell(cur, p, maxW - 16 * d), pad + 16 * d, midY + 8 * d, p)
-        }
         // dotted progress bar
         val end = if (lines.isEmpty()) 1.0 else lines.last().t + 4
         val frac = (pos / end).coerceIn(0.0, 1.0)
-        val step = 8 * d; val n = ((w - 2 * pad) / step).toInt()
+        val step = 7 * d; val n = ((w - 2 * pad) / step).toInt()
         val dot = Paint(Paint.ANTI_ALIAS_FLAG)
-        val by = h - pad - barH / 2
+        val by = h - pad - 2 * d
         for (k in 0 until n) {
             dot.color = if (k < frac * n) Color.WHITE else 0xFF444444.toInt()
-            cv.drawCircle(pad + step * (k + .5f), by, 1.8f * d, dot)
+            cv.drawCircle(pad + step * (k + .5f), by, 1.5f * d, dot)
+        }
+        // lyrics area
+        val top = hy + 10 * d; val bottom = by - 12 * d
+        val area = bottom - top; val maxW = w - 2 * pad
+        val i = LrcParser.index(lines, pos)
+        if (lines.isEmpty() || i < 0 && lines.isEmpty()) {
+            p.typeface = bold; p.textSize = 20 * d; p.color = WHITE
+            cv.drawText(ell(status ?: "NO LYRICS", p, maxW), pad, (top + bottom) / 2 + 7 * d, p)
+            return bmp
+        }
+        val cur = if (i >= 0) lines[i].s.ifEmpty { "♪" } else "♪"
+        // largest current-line size that wraps into at most maxLines lines within ~60% of the area
+        p.typeface = bold
+        val maxLines = if (area > 150 * d) 4 else if (area > 90 * d) 3 else 2
+        var size = minOf(30f, maxOf(14f, area / d * 0.16f))
+        var wrapped: List<String>
+        while (true) {
+            p.textSize = size * d
+            wrapped = wrap(p, cur, maxW - 14 * d)
+            if ((wrapped.size <= maxLines && wrapped.size * size * 1.2f * d <= area * .7f) || size <= 11f) break
+            size -= 1f
+        }
+        val lh = size * 1.2f * d
+        val curH = wrapped.size * lh
+        val y0 = top + (area - curH) / 2
+        p.color = WHITE
+        wrapped.forEachIndexed { k, t -> cv.drawText(if (k == wrapped.lastIndex || true) ell(t, p, maxW - 14 * d) else t, pad + 14 * d, y0 + lh * k + size * d, p) }
+        val red = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = RED }
+        cv.drawCircle(pad + 4 * d, y0 + size * d * 0.6f, 3.5f * d, red)
+        // context lines, as many as fit
+        val csize = maxOf(10f, size * 0.55f)
+        p.typeface = reg; p.textSize = csize * d; p.color = DIM
+        val cl = csize * 1.7f * d
+        val fit = ((area - curH) / 2 / cl).toInt().coerceIn(0, 2)
+        for (off in 1..fit) {
+            val before = i - off; val after = i + off
+            if (before in lines.indices) cv.drawText(ell(lines[before].s.ifEmpty { "♪" }, p, maxW), pad, y0 - cl * (off - 1) - csize * .5f * d, p)
+            if (after in lines.indices) cv.drawText(ell(lines[after].s.ifEmpty { "♪" }, p, maxW), pad, y0 + curH + cl * (off - 1) + csize * 1.1f * d, p)
         }
         return bmp
     }
@@ -109,15 +132,16 @@ object Renderers {
         }
     }
 
-    /** pixel size to render a widget at, from its options (dp -> px, capped for RemoteViews memory). */
-    fun sizePx(ctx: Context, id: Int, defW: Int, defH: Int): Pair<Int, Int> {
+    /** Widget size in px plus px-per-dp, from its options. Capped so the bitmap stays small enough for RemoteViews. */
+    fun sizePx(ctx: Context, id: Int, defW: Int, defH: Int): Triple<Int, Int, Float> {
         val o = android.appwidget.AppWidgetManager.getInstance(ctx).getAppWidgetOptions(id)
-        val dm = ctx.resources.displayMetrics
-        val wDp = o.getInt(android.appwidget.AppWidgetManager.OPTION_APPWIDGET_MIN_WIDTH, defW)
-        val hDp = o.getInt(android.appwidget.AppWidgetManager.OPTION_APPWIDGET_MIN_HEIGHT, defH)
-        var w = (wDp * dm.density).toInt().coerceAtLeast(200); var h = (hDp * dm.density).toInt().coerceAtLeast(200)
-        val max = 900
-        if (w > max || h > max) { val f = max / maxOf(w, h).toFloat(); w = (w * f).toInt(); h = (h * f).toInt() }
-        return w to h
+        val land = ctx.resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
+        val wDp = o.getInt(if (land) android.appwidget.AppWidgetManager.OPTION_APPWIDGET_MAX_WIDTH else android.appwidget.AppWidgetManager.OPTION_APPWIDGET_MIN_WIDTH, defW).coerceAtLeast(60)
+        val hDp = o.getInt(if (land) android.appwidget.AppWidgetManager.OPTION_APPWIDGET_MIN_HEIGHT else android.appwidget.AppWidgetManager.OPTION_APPWIDGET_MAX_HEIGHT, defH).coerceAtLeast(60)
+        var d = ctx.resources.displayMetrics.density
+        val cap = 1000f
+        val big = maxOf(wDp * d, hDp * d)
+        if (big > cap) d *= cap / big
+        return Triple((wDp * d).toInt(), (hDp * d).toInt(), d)
     }
 }

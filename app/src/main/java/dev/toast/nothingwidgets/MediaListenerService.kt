@@ -101,8 +101,8 @@ class MediaListenerService : NotificationListenerService() {
         if (ids.isEmpty() || !screenOn) return
         val pos = position()
         for (id in ids) {
-            val (w, h) = Renderers.sizePx(this, id, 250, 180)
-            Renderers.push(this, Renderers.lyrics(this, w, h, lines, pos, status), intArrayOf(id))
+            val (w, h, d) = Renderers.sizePx(this, id, 250, 180)
+            Renderers.push(this, Renderers.lyrics(this, w, h, d, lines, pos, status), intArrayOf(id))
         }
         if (controller?.playbackState?.state == PlaybackState.STATE_PLAYING) main.postDelayed(tick, 1000)
     }
