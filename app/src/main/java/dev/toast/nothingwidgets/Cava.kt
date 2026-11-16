@@ -14,6 +14,7 @@ class Cava(private val cols: Int = 8) {
     private val peak = FloatArray(cols)
     private val fallT = FloatArray(cols)
     private val out = FloatArray(cols)
+    private val avg = FloatArray(cols) { 0.3f }
     private val shaped = FloatArray(cols)
     var gravity = 2.2f          // 1/s: full fall from 1.0 takes about 1/gravity seconds (accelerating)
     var neighbour = 1.55f       // monstercat falloff per column
@@ -22,7 +23,9 @@ class Cava(private val cols: Int = 8) {
     fun process(raw: FloatArray, dt: Float, gain: Float): FloatArray {
         var over = false; var maxV = 0f
         for (i in 0 until cols) {
-            val v = raw[i] * gain * sens
+            // spectral whitening: divide by a slow per-band average so every band swings around mid-height
+            avg[i] += (raw[i] - avg[i]) * (dt / 2.5f).coerceAtMost(1f)
+            val v = raw[i] / (0.22f + avg[i] * 1.1f) * 0.55f * gain * sens
             if (v > 1f) over = true
             maxV = max(maxV, v)
             if (v >= out[i]) { out[i] = v.coerceAtMost(1f); peak[i] = out[i]; fallT[i] = 0f }

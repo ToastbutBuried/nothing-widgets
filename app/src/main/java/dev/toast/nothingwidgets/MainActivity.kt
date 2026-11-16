@@ -28,6 +28,7 @@ class MainActivity : Activity() {
         root.addView(btn("2. Audio permission + notifications (visualizer)") {
             requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.POST_NOTIFICATIONS), 1)
         })
+        root.addView(btn("3. Start / stop visualizer") { toggleViz() })
         root.addView(Switch(this).apply {
             text = "Red visualizer"; typeface = tf; setTextColor(Renderers.WHITE); isChecked = Prefs.red(this@MainActivity)
             setOnCheckedChangeListener { _, v -> Prefs.setRed(this@MainActivity, v); preview.invalidate(); sendBroadcast(Intent(this@MainActivity, VizWidgetProvider::class.java).setAction("android.appwidget.action.APPWIDGET_UPDATE").putExtra("appWidgetIds", android.appwidget.AppWidgetManager.getInstance(this@MainActivity).getAppWidgetIds(ComponentName(this@MainActivity, VizWidgetProvider::class.java)))) }
@@ -48,7 +49,14 @@ class MainActivity : Activity() {
             })
         })
         root.addView(tv("\nLong-press the home screen > Widgets > add Lyrics and Visualizer. Tap the visualizer widget to start or stop it.", 12f, Renderers.DIM))
+        if (intent.getBooleanExtra("viz", false)) toggleViz()
         setContentView(ScrollView(this).apply { setBackgroundColor(Color.BLACK); addView(root) })
+    }
+
+    private fun toggleViz() {
+        if (VisualizerService.active) startService(Intent(this, VisualizerService::class.java).setAction(VisualizerService.ACTION_STOP))
+        else startForegroundService(Intent(this, VisualizerService::class.java))
+        status.postDelayed({ refresh() }, 500)
     }
 
     override fun onResume() { super.onResume(); refresh() }

@@ -52,16 +52,22 @@ object Fft {
         return out
     }
 
-    /** 8 band levels 0..1 from Visualizer.getFft bytes (re,im pairs, index 0/1 = DC/Nyquist). */
+    /**
+     * 8 band levels from Visualizer.getFft bytes (re,im pairs). Linear magnitude averaged per band, like cava:
+     * no dB squashing, so loud and quiet moments really differ. Cava (auto sensitivity) scales it afterwards.
+     * Higher bands are weighted up because music has much less energy there.
+     */
     fun bandsFromFft(fft: ByteArray, cols: Int = 8): FloatArray {
         val bins = fft.size / 2
         val out = FloatArray(cols)
         for (c in 0 until cols) {
-            val lo = (((c.toDouble() / cols).pow(1.6)) * bins * 0.6).toInt().coerceAtLeast(1)
-            val hi = (((((c + 1).toDouble() / cols)).pow(1.6)) * bins * 0.6).toInt().coerceAtLeast(lo + 1).coerceAtMost(bins - 1)
-            var m = 0.0
-            for (i in lo..hi) { val r = fft[2 * i].toDouble(); val im = fft[2 * i + 1].toDouble(); m = max(m, sqrt(r * r + im * im)) }
-            out[c] = (20 * log10(m + 1) / 42).coerceIn(0.0, 1.0).toFloat()
+            val lo = (((c.toDouble() / cols).pow(2.0)) * bins * 0.5).toInt().coerceAtLeast(1)
+            val hi = (((((c + 1).toDouble() / cols)).pow(2.0)) * bins * 0.5).toInt().coerceAtLeast(lo + 1).coerceAtMost(bins - 1)
+            var sum = 0.0
+            for (i in lo..hi) { val r = fft[2 * i].toDouble(); val im = fft[2 * i + 1].toDouble(); sum += sqrt(r * r + im * im) }
+            val mean = sum / (hi - lo + 1)
+            val weight = 1.0 + c * 0.35
+            out[c] = (mean / 60.0 * weight).pow(0.8).coerceIn(0.0, 1.5).toFloat()
         }
         return out
     }
