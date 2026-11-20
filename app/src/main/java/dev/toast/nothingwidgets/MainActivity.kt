@@ -25,6 +25,12 @@ import android.widget.*
 
 /** Settings screen, styled like the widgets: black cards, dot-matrix headings, pill controls. */
 class MainActivity : Activity() {
+    private companion object {
+        const val REQ_EXPORT = 7
+        /** cap stops in MB; 0 = unlimited, always the far right */
+        val ART_CAPS = listOf(10, 25, 50, 75, 100, 150, 200, 300, 500, 0)
+        val LYR_CAPS = listOf(1, 2, 5, 10, 25, 50, 100, 0)
+    }
     private val LABEL = 0xFF8A8A8A.toInt()
     private val ui = Handler(Looper.getMainLooper())
     private lateinit var dotoB: Typeface
@@ -48,6 +54,13 @@ class MainActivity : Activity() {
     private lateinit var vizButton: TextView
     private lateinit var sensValue: TextView
     private lateinit var preview: PreviewView
+    private lateinit var saveBtn: TextView
+    private lateinit var cacheState: TextView
+    private lateinit var artUse: TextView
+    private lateinit var lyrUse: TextView
+    private lateinit var savedInfo: TextView
+    private var pendingExport: String? = null
+    private var ticks = 0
     private var dragging = false
 
     private val tick = object : Runnable { override fun run() { refresh(); ui.postDelayed(this, 1000) } }
@@ -162,17 +175,21 @@ class MainActivity : Activity() {
         val minus = pill("−") { nudgeLatency(-50) }; val plus = pill("+") { nudgeLatency(50) }
         val refreshBtn = pill("Refresh") {
             val s = svc() ?: return@pill
-            s.refreshLyrics(); toast("Searching again…")
+            if (s.refreshLyrics()) toast("Searching again…") else toast("These lyrics are saved. Unsave them first.")
         }
+        saveBtn = pill("Save") { toggleSave() }
+        val exportBtn = pill("Export") { exportLyrics() }
         val pickBtn = pill("Pick lyrics", primary = true) { listFinds() }
         val searchBtn = pill("Search manually") { manualSearch() }
         val resetBtn = pill("Reset") { latBar.progress = 100; setLatency(0) }
-        lyricControls = listOf(refreshBtn, pickBtn, searchBtn, minus, plus, resetBtn, latBar)
+        lyricControls = listOf(refreshBtn, pickBtn, searchBtn, saveBtn, exportBtn, minus, plus, resetBtn, latBar)
         add(card().apply {
             addView(header("Lyrics", lyrState)); addView(space(16))
             addView(text("NOW PLAYING", 10f, LABEL, dotoB).apply { letterSpacing = .18f }); addView(space(6))
             addView(trackTitle); addView(space(4)); addView(trackArtist); addView(space(16))
-            addView(row(refreshBtn, pickBtn)); addView(space(8)); addView(searchBtn, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)); addView(space(22))
+            addView(row(refreshBtn, pickBtn)); addView(space(8)); addView(searchBtn, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)); addView(space(8))
+            addView(row(saveBtn, exportBtn)); addView(space(8))
+            addView(text("Save keeps these lyrics for good, also offline and after clearing the cache. Picked lyrics are saved automatically.", 11f, Renderers.DIM)); addView(space(22))
             addView(LinearLayout(context).apply {
                 orientation = LinearLayout.HORIZONTAL; gravity = Gravity.BOTTOM
                 addView(LinearLayout(context).apply {
@@ -249,6 +266,26 @@ class MainActivity : Activity() {
         })
         sensValue.text = "%.1f×".format(Prefs.gain(this))
 
+        // cache (housekeeping, so last)
+        cacheState = text("", 11f, LABEL, dotoB)
+        artUse = text("", 11f, Renderers.DIM); lyrUse = text("", 11f, Renderers.DIM)
+        savedInfo = text("", 11f, Renderers.DIM)
+        fun capChanged() { MediaListenerService.instance?.cacheChanged(false) ?: Thread { Caches.trim(this) }.start(); updateCache() }
+        val nfDays = listOf(1, 3, 7, 30, 0)
+        add(card().apply {
+            addView(header("Cache", cacheState)); addView(space(18))
+            capSlider(this, "COVERS", ART_CAPS, 75, Prefs.artCapMb(context), artUse) { Prefs.setArtCapMb(context, it); capChanged() }
+            addView(space(18))
+            capSlider(this, "LYRICS", LYR_CAPS, 10, Prefs.lyrCapMb(context), lyrUse) { Prefs.setLyrCapMb(context, it); capChanged() }
+            addView(space(20))
+            addView(sub("RETRY \"NO LYRICS\" AFTER · DAYS"))
+            addView(segmented(nfDays.map { if (it == 0) "Off" else "$it" }, nfDays.indexOf(Prefs.notFoundDays(context)).coerceAtLeast(2)) { Prefs.setNotFoundDays(context, nfDays[it]) })
+            addView(space(18))
+            addView(pill("Clear cache") { clearCache() }, LinearLayout.LayoutParams(MATCH_PARENT, dp(48))); addView(space(8))
+            addView(savedInfo); addView(space(4))
+            addView(text("Covers and lyrics of songs you played, so they show instantly and offline. When a cap is full the least recently played go first.", 11f, Renderers.DIM))
+        })
+
         // footer
         val ver = try { packageManager.getPackageInfo(packageName, 0).versionName } catch (_: Exception) { "?" }
         add(text("Add the widgets: long-press the home screen › Widgets › Nothing Widgets. Lyrics resizes freely; the visualizer is 2×2, tap it to start or stop. Both widgets resize.\n\nv$ver",
@@ -263,6 +300,36 @@ class MainActivity : Activity() {
             }
         })
         if (intent.getBooleanExtra("viz", false)) toggleViz()
+    }
+
+    private fun capText(mb: Int, rec: Int) = (if (mb == 0) "UNLIMITED" else "$mb MB") + if (mb == rec) " · RECOMMENDED" else ""
+
+    /** Label + live value, a stepped slider (far right = unlimited) and the usage line under it. Saves on release only,
+     *  so dragging past a small cap doesn't evict anything. */
+    private fun capSlider(card: LinearLayout, name: String, stops: List<Int>, rec: Int, cur: Int, usage: TextView, onSet: (Int) -> Unit) {
+        val value = text(capText(cur, rec), 12f, Renderers.WHITE, dotoB)
+        val start = stops.indexOf(cur).let { if (it < 0) stops.indexOf(rec) else it }
+        val sb = SeekBar(this).apply {
+            max = stops.size - 1; progress = start
+            progressTintList = ColorStateList.valueOf(Renderers.RED)
+            progressBackgroundTintList = ColorStateList.valueOf(0xFF333333.toInt())
+            thumbTintList = ColorStateList.valueOf(Renderers.WHITE)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(s: SeekBar, p: Int, u: Boolean) { value.text = capText(stops[p], rec) }
+                override fun onStartTrackingTouch(s: SeekBar) { dragging = true }
+                override fun onStopTrackingTouch(s: SeekBar) { dragging = false; onSet(stops[s.progress]) }
+            })
+        }
+        card.addView(header2(name, value)); card.addView(space(4))
+        card.addView(sb); card.addView(space(4))
+        card.addView(usage)
+    }
+
+    /** small caps label left, value right */
+    private fun header2(t: String, right: TextView) = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+        addView(text(t, 10f, LABEL, dotoB).apply { letterSpacing = .18f }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+        addView(right)
     }
 
     private fun sub(t: String) = text(t, 10f, LABEL, dotoB).apply { letterSpacing = .18f; setPadding(0, 0, 0, dp(8)) }
@@ -322,6 +389,64 @@ class MainActivity : Activity() {
             }.setNegativeButton("Cancel", null).show()
     }
 
+    private fun toggleSave() {
+        val s = svc() ?: return
+        if (!s.isSaved()) { if (s.saveLyrics()) toast("Saved") else toast("No lyrics to save"); refresh(); return }
+        AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert).setTitle("Unsave lyrics?")
+            .setMessage("Goes back to the automatic LRCLIB match for this song.")
+            .setPositiveButton("Unsave") { _, _ -> s.unsaveLyrics(); refresh() }.setNegativeButton("Cancel", null).show()
+    }
+
+    private fun exportLyrics() {
+        val s = svc() ?: return
+        val (name, body) = s.exportLyrics() ?: run { toast("No lyrics to export"); return }
+        pendingExport = body
+        val i = Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
+            .setType(if (name.endsWith(".txt")) "text/plain" else "application/octet-stream").putExtra(Intent.EXTRA_TITLE, name)
+        try { startActivityForResult(i, REQ_EXPORT) } catch (_: Exception) { toast("No file picker on this phone") }
+    }
+
+    @Suppress("OVERRIDE_DEPRECATION")   // the androidx result API would be the only dependency
+    override fun onActivityResult(req: Int, res: Int, data: Intent?) {
+        super.onActivityResult(req, res, data)
+        if (req != REQ_EXPORT) return
+        val body = pendingExport; pendingExport = null
+        val uri = data?.data
+        if (res != RESULT_OK || uri == null || body == null) return
+        try { contentResolver.openOutputStream(uri)?.use { it.write(body.toByteArray()) }; toast("Exported") }
+        catch (_: Exception) { toast("Export failed") }
+    }
+
+    private fun clearCache() {
+        AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert).setTitle("Clear cache?")
+            .setMessage("Removes cached covers and lyrics. Saved lyrics stay.")
+            .setPositiveButton("Clear") { _, _ ->
+                Thread { Caches.clear(this); ui.post { MediaListenerService.instance?.cacheChanged(true) ?: Caches.clearMem(); updateCache(); toast("Cache cleared") } }.start()
+            }.setNegativeButton("Cancel", null).show()
+    }
+
+    private fun mb(b: Long) = when {
+        b < DiskCache.MB -> "%.0f KB".format(b / 1024.0)
+        b % DiskCache.MB == 0L -> "${b / DiskCache.MB} MB"
+        else -> "%.1f MB".format(b / DiskCache.MB.toDouble())
+    }
+    private fun plural(n: Int, one: String) = "$n $one" + if (n == 1) "" else "s"
+
+    /** reads the cache folders off the main thread */
+    private fun updateCache() = Thread {
+        val st = Caches.stats(this)
+        val artCap = Prefs.artCapMb(this) * DiskCache.MB; val lyrCap = Prefs.lyrCapMb(this) * DiskCache.MB   // 0 = unlimited
+        ui.post {
+            if (isFinishing) return@post
+            fun use(n: Int, one: String, b: Long, cap: Long) = "${plural(n, one)} · ${mb(b)} used" +
+                if (cap > 0 && b * 100 >= cap) " · ${(b * 100 / cap).coerceAtMost(100)}%" else ""
+            artUse.text = use(st.artCount, "cover", st.artBytes, artCap)
+            lyrUse.text = use(st.lyrCount, "song", st.lyrBytes, lyrCap)
+            savedInfo.text = "${plural(st.saved, "saved song")} · not in the caps, never cleared"
+            cacheState.text = mb(st.artBytes + st.lyrBytes)
+        }
+    }.start()
+
     private fun toggleViz() {
         if (VisualizerService.active) startService(Intent(this, VisualizerService::class.java).setAction(VisualizerService.ACTION_STOP))
         else if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) { toast("Grant audio first"); return }
@@ -340,6 +465,7 @@ class MainActivity : Activity() {
     override fun onRequestPermissionsResult(r: Int, p: Array<out String>, g: IntArray) = refresh()
 
     private fun refresh() {
+        if (ticks++ % 5 == 0) updateCache()
         val notif = Settings.Secure.getString(contentResolver, "enabled_notification_listeners")?.contains(packageName) == true
         val audio = checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
         for ((p, ok) in listOf(notifPill to notif, audioPill to audio)) {
@@ -356,6 +482,8 @@ class MainActivity : Activity() {
         trackArtist.text = if (has) parts.getOrElse(1) { "" } else if (!notif) "grant notification access first" else "start music in any app"
         lyrState.text = if (has) s!!.lyricInfo() else "IDLE"
         lyricControls.forEach { it.isEnabled = has; it.alpha = if (has) 1f else .35f }
+        val sv = has && s!!.isSaved()
+        saveBtn.text = if (sv) "● SAVED" else "SAVE"; stylePill(saveBtn, sv)
         if (!dragging) { val ms = s?.latencyMs ?: 0; latBar.progress = ms / 50 + 100; latValue.text = latText(ms) }
 
         val sw = GestureService.enabled(this)

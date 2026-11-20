@@ -7,7 +7,6 @@ import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
-import java.security.MessageDigest
 
 data class Candidate(val id: Long, val track: String, val artist: String, val duration: Double, val synced: String) {
     fun label(): String {
@@ -31,14 +30,14 @@ object LatencyStore {
 }
 
 object LrclibClient {
-    private fun key(t: String, a: String): String =
-        MessageDigest.getInstance("MD5").digest("$t|$a".lowercase().toByteArray()).joinToString("") { "%02x".format(it) }
+    /** saved lyrics (picked or saved by hand) live in filesDir: outside the cache cap and the system's cache cleanup */
+    private fun choiceFile(c: Context, t: String, a: String) = File(c.filesDir, "choice_" + DiskCache.key(t, a) + ".lrc")
 
-    private fun cacheFile(c: Context, t: String, a: String) = File(c.cacheDir, "lrc_" + key(t, a) + ".lrc")
-    private fun choiceFile(c: Context, t: String, a: String) = File(c.filesDir, "choice_" + key(t, a) + ".lrc")
-
-    fun clear(c: Context, t: String, a: String) { cacheFile(c, t, a).delete(); choiceFile(c, t, a).delete() }
+    /** drops the cached auto match (or not-found marker); saved lyrics stay */
+    fun clearCached(c: Context, t: String, a: String) = Caches.lyrics(c).remove(DiskCache.key(t, a))
     fun saveChoice(c: Context, t: String, a: String, lrc: String) = choiceFile(c, t, a).writeText(lrc)
+    fun isSaved(c: Context, t: String, a: String) = choiceFile(c, t, a).exists()
+    fun unsave(c: Context, t: String, a: String) { choiceFile(c, t, a).delete() }
 
     private fun get(url: String): JSONArray? = try {
         val c = URL(url).openConnection() as HttpURLConnection
@@ -83,15 +82,20 @@ object LrclibClient {
 
     const val PLAIN = "#PLAIN\n"
 
-    /** Blocking. Order: your pick, then cache, then best auto match. "" = none, null = offline, PLAIN prefix = unsynced text. */
+    /** Blocking. Order: saved, then cache, then best auto match. "" = none, null = offline, PLAIN prefix = unsynced text. */
     fun fetch(ctx: Context, title: String, artist: String, durationSec: Long?): String? {
         val ch = choiceFile(ctx, title, artist)
         if (ch.exists()) return ch.readText()
-        val f = cacheFile(ctx, title, artist)
-        if (f.exists()) return f.readText()
+        val cache = Caches.lyrics(ctx); val k = DiskCache.key(title, artist)
+        cache.get(k)?.let { f ->
+            val t = try { f.readText() } catch (_: Exception) { null }
+            if (t != null && !NotFound.isMarker(t)) return t
+            if (t != null && !NotFound.expired(t, System.currentTimeMillis(), Prefs.notFoundDays(ctx))) return ""
+            cache.remove(k)   // not-found marker is old enough: ask LRCLIB again
+        }
         val r = search(title, artist) ?: return null
         val out = pickBest(r.synced, durationSec)?.synced ?: r.plain?.let { PLAIN + it } ?: ""
-        f.writeText(out)
+        cache.put(k, (out.ifEmpty { NotFound.marker(System.currentTimeMillis()) }).toByteArray())
         return out
     }
 

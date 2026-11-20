@@ -8,7 +8,8 @@ Dot-matrix home-screen widgets for Nothing phones (built on a Phone (3a) Lite, w
 
 **Lyrics** - synced lyrics for whatever is playing in any music app, fetched from [LRCLIB](https://lrclib.net).
 Word-by-word karaoke fill when the lyrics have word timings, previous/next lines for context, ⏮ ⏯ ⏭ buttons,
-tap a line to jump to it. Per-song timing offset and a lyrics picker in the app. Resizes freely.
+tap a line to jump to it. Per-song timing offset and a lyrics picker in the app. Save lyrics to keep them for good,
+or export them as a `.lrc` file. Resizes freely.
 
 **Artwork** - the album cover with Nothing's little animated dot eq while playing.
 - swipe left / right: next / previous track (the card follows your finger)
@@ -22,6 +23,10 @@ It reads nothing else. Without it, tapping still pauses.
 
 **Visualizer** - cava-style dot visualizer of what the phone is playing (dots or bars, white or red, 8-16 bands, peak caps).
 Uses the audio output mix, not the microphone. 2×2 and up.
+
+**Cache** - covers and lyrics of songs you played are kept so they show instantly and offline. Each has its own size cap
+(slider, default 75 MB covers / 10 MB lyrics, far right = unlimited); the least recently played go first.
+Songs LRCLIB has no lyrics for are searched again after 7 days (1 / 3 / 7 / 30 / off). Saved lyrics never count or expire.
 
 ## Install
 

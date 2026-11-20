@@ -46,4 +46,15 @@ object Prefs {
     /** corner radius in dp; 19 matches Nothing's own music widget (measured on the phone) */
     fun artRadius(c: Context) = i(c, "artRadius", 19)
     fun setArtRadius(c: Context, v: Int) = setI(c, "artRadius", v)
+
+    // cache
+    /** album art cache cap in MB, 0 = unlimited (~80 KB a cover, so 75 MB is ~900 covers) */
+    fun artCapMb(c: Context) = i(c, "artCap", 75)
+    fun setArtCapMb(c: Context, v: Int) = setI(c, "artCap", v)
+    /** lyrics cache cap in MB, 0 = unlimited (~4 KB a song, so 10 MB is ~2500 songs) */
+    fun lyrCapMb(c: Context) = i(c, "lyrCap", 10)
+    fun setLyrCapMb(c: Context, v: Int) = setI(c, "lyrCap", v)
+    /** days before a "no lyrics found" song is searched again; 0 = never */
+    fun notFoundDays(c: Context) = i(c, "nfDays", 7)
+    fun setNotFoundDays(c: Context, v: Int) = setI(c, "nfDays", v)
 }

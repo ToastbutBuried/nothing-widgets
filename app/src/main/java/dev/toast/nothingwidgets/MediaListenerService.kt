@@ -101,6 +101,8 @@ class MediaListenerService : NotificationListenerService() {
     // ---- album art (artwork widget) ----
     private var art: android.graphics.Bitmap? = null
     private var artSrc: Any? = null
+    /** track the shown cover belongs to (art can come from the cache when the player sends none) */
+    private var artFor = ""
     /** bumps whenever the track or its cover changes; the swipe overlay waits on it after a skip */
     @Volatile var trackVer = 0
         private set
@@ -112,16 +114,29 @@ class MediaListenerService : NotificationListenerService() {
         val uri = if (bmp != null) null else (md?.getString(MediaMetadata.METADATA_KEY_ALBUM_ART_URI)
             ?: md?.getString(MediaMetadata.METADATA_KEY_ART_URI) ?: md?.getString(MediaMetadata.METADATA_KEY_DISPLAY_ICON_URI))
         val src: Any? = bmp ?: uri
-        if (src == artSrc && (src != null || art == null)) return
-        artSrc = src
-        if (bmp != null || uri == null) { art = bmp; trackVer++; artSig.clear(); return }
-        art = null; trackVer++; artSig.clear()
         val k = trackKey
+        if (src == artSrc && k == artFor) return
+        artSrc = src; artFor = k
+        trackVer++; artSig.clear()
+        if (bmp != null) {
+            art = bmp
+            if (k.isNotEmpty()) { Caches.remember(k, bmp); io.execute { Caches.artPut(this, k, bmp) } }
+            return
+        }
+        // no bitmap in the metadata: show the cached cover now, then load the URI (if any) and refresh the cache
+        art = if (k.isEmpty()) null else Caches.artMem(k)
+        if (k.isEmpty()) return
+        val haveMem = art != null
+        fun show(b: android.graphics.Bitmap) = main.post {
+            if (artSrc == src && artFor == k) { Caches.remember(k, b); art = b; trackVer++; artSig.clear(); redraw() }
+        }
         io.execute {
+            if (!haveMem) Caches.artDisk(this, k)?.let { show(it) }
+            if (uri == null) return@execute
             val b = try {
                 contentResolver.openInputStream(android.net.Uri.parse(uri))?.use { android.graphics.BitmapFactory.decodeStream(it) }
             } catch (_: Exception) { null }
-            main.post { if (artSrc == uri && trackKey == k && b != null) { art = b; trackVer++; artSig.clear(); redraw() } }
+            if (b != null) { Caches.artPut(this, k, b); show(b) }
         }
     }
 
@@ -131,7 +146,7 @@ class MediaListenerService : NotificationListenerService() {
         val artist = md?.getString(MediaMetadata.METADATA_KEY_ARTIST) ?: md?.getString(MediaMetadata.METADATA_KEY_ALBUM_ARTIST) ?: ""
         if (title.isEmpty()) {
             if (trackKey.isNotEmpty()) trackVer++
-            trackKey = ""; lines = emptyList(); status = "NO MUSIC"; latencyMs = 0; curTitle = ""; curArtist = ""; return
+            trackKey = ""; lines = emptyList(); status = "NO MUSIC"; latencyMs = 0; curTitle = ""; curArtist = ""; curLrc = null; saved = false; return
         }
         val k = "$title|$artist"
         if (k == trackKey) return
@@ -139,13 +154,22 @@ class MediaListenerService : NotificationListenerService() {
         val dur = (md?.getLong(MediaMetadata.METADATA_KEY_DURATION) ?: 0L) / 1000
         curTitle = title; curArtist = artist; curDur = dur
         latencyMs = LatencyStore.get(this, k)   // each song keeps its own saved latency
+        saved = LrclibClient.isSaved(this, title, artist)
+        lrcMem.get(k)?.let { apply(it); return }
         io.execute {
             val lrc = LrclibClient.fetch(this, title, artist, dur)
-            main.post { if (trackKey == k) apply(lrc) }
+            main.post { if (trackKey == k) { if (!lrc.isNullOrEmpty()) lrcMem.put(k, lrc); apply(lrc) } }
         }
     }
 
+    /** raw lyrics of the last few songs (never "not found"/offline, those must be able to retry) */
+    private val lrcMem = android.util.LruCache<String, String>(16)
+    /** raw text of what is shown now: lrc, PLAIN-prefixed text, "" (none) or null (offline) */
+    private var curLrc: String? = null
+    private var saved = false
+
     private fun apply(lrc: String?) {
+        curLrc = lrc
         if (lrc != null && lrc.startsWith(LrclibClient.PLAIN)) {
             lines = LrcParser.plain(lrc.removePrefix(LrclibClient.PLAIN), curDur.toDouble())
             status = if (lines.isEmpty()) "NO LYRICS" else "PLAIN"
@@ -183,7 +207,41 @@ class MediaListenerService : NotificationListenerService() {
     }
 
     // ---- used by the settings screen ----
-    fun refreshLyrics() { LrclibClient.clear(this, curTitle, curArtist); trackKey = ""; shownIdx = -2; loadTrack(); redraw() }
+    /** Searches LRCLIB again for this song. false = it has saved lyrics, which win over any search (unsave first). */
+    fun refreshLyrics(): Boolean {
+        if (saved) return false
+        val k = trackKey
+        io.execute { LrclibClient.clearCached(this, curTitle, curArtist); main.post { if (trackKey == k) reload() } }
+        return true
+    }
+
+    private fun reload() { lrcMem.remove(trackKey); trackKey = ""; shownIdx = -2; loadTrack(); redraw() }
+
+    fun isSaved() = saved
+    /** Keeps the current lyrics for good: outside the cache cap, never searched again. false = nothing to save. */
+    fun saveLyrics(): Boolean {
+        val l = curLrc ?: return false
+        if (l.isEmpty() || !hasTrack()) return false
+        LrclibClient.saveChoice(this, curTitle, curArtist, l); saved = true
+        return true
+    }
+    /** Back to the cached / searched match. */
+    fun unsaveLyrics() { LrclibClient.unsave(this, curTitle, curArtist); saved = false; reload() }
+
+    /** file name + content for exporting the current lyrics; synced as .lrc (with title/artist tags), plain as .txt */
+    fun exportLyrics(): Pair<String, String>? {
+        val l = curLrc?.takeIf { it.isNotEmpty() && hasTrack() } ?: return null
+        val base = (if (curArtist.isNotEmpty()) "$curArtist - $curTitle" else curTitle).replace(Regex("[\\\\/:*?\"<>|]"), "_").take(120)
+        if (l.startsWith(LrclibClient.PLAIN)) return "$base.txt" to l.removePrefix(LrclibClient.PLAIN)
+        val tags = if (l.contains("[ti:")) "" else "[ti:$curTitle]\n[ar:$curArtist]\n"
+        return "$base.lrc" to tags + l
+    }
+
+    /** settings changed a cap or cleared the cache */
+    fun cacheChanged(cleared: Boolean) {
+        if (cleared) { lrcMem.evictAll(); Caches.clearMem() }
+        io.execute { Caches.trim(this) }
+    }
 
     /** Manual search when title/artist given, else the current track's metadata. */
     fun findCandidates(title: String? = null, artist: String? = null, cb: (List<Candidate>?) -> Unit) {
@@ -191,12 +249,12 @@ class MediaListenerService : NotificationListenerService() {
         io.execute { val r = LrclibClient.search(t, a); main.post { cb(r?.synced) } }
     }
 
-    fun choose(c: Candidate) { LrclibClient.saveChoice(this, curTitle, curArtist, c.synced); apply(c.synced) }
+    fun choose(c: Candidate) { LrclibClient.saveChoice(this, curTitle, curArtist, c.synced); saved = true; lrcMem.put(trackKey, c.synced); apply(c.synced) }
 
     fun setLatency(ms: Int) { latencyMs = ms; LatencyStore.set(this, trackKey, ms); shownIdx = -2; redraw() }
     fun hasTrack() = trackKey.isNotEmpty()
-    fun lyricInfo(): String = status?.let { if (it == "PLAIN") "PLAIN · ${lines.size} LINES" else it }
-        ?: ("${lines.size} LINES" + if (lines.any { it.words.isNotEmpty() }) " · WORDS" else "")
+    fun lyricInfo(): String = (if (saved) "SAVED · " else "") + (status?.let { if (it == "PLAIN") "PLAIN · ${lines.size} LINES" else it }
+        ?: ("${lines.size} LINES" + if (lines.any { it.words.isNotEmpty() }) " · WORDS" else ""))
     fun title() = curTitle
     fun artist() = curArtist
     fun sizeChanged(id: Int) { sizes.remove(id); artSig.remove(id); redraw() }
