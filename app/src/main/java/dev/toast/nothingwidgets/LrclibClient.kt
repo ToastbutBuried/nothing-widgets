@@ -16,16 +16,57 @@ data class Candidate(val id: Long, val track: String, val artist: String, val du
     }
 }
 
-/** Remembers a per-song latency (ms) in files/latency.json; applied again whenever that song plays. */
+/**
+ * Per-song latency (ms) in files/latency.json, plus album- and artist-wide defaults: most timing drift comes from how an
+ * album was mastered/uploaded, so one fix can cover the rest of it. Song keys are "title|artist"; defaults live under
+ * "album:<artist>|<album>" and "artist:<artist>"; "@album" maps each song with its own value to its album.
+ */
 object LatencyStore {
     private fun file(c: Context) = File(c.filesDir, "latency.json")
     private fun read(c: Context): JSONObject = try { JSONObject(file(c).readText()) } catch (_: Exception) { JSONObject() }
-    fun get(c: Context, key: String): Int = if (key.isEmpty()) 0 else read(c).optInt(key, 0)
-    fun set(c: Context, key: String, ms: Int) {
+    private fun write(c: Context, o: JSONObject) = file(c).writeText(o.toString())
+    fun albumKey(artist: String, album: String) = if (album.isEmpty()) "" else "album:${artist.lowercase()}|${album.lowercase()}"
+    fun artistKey(artist: String) = if (artist.isEmpty()) "" else "artist:${artist.lowercase()}"
+
+    /** where the latency in effect came from */
+    enum class Src { NONE, SONG, ALBUM, ARTIST, GUESS }
+
+    /**
+     * Song value, else the album default, else the artist default, else a guess: when at least two other songs of this
+     * album have their own value and agree within 300 ms, their average.
+     */
+    fun resolve(c: Context, key: String, artist: String, album: String): Pair<Int, Src> {
+        if (key.isEmpty()) return 0 to Src.NONE
+        val o = read(c)
+        if (o.has(key)) return o.optInt(key) to Src.SONG
+        val ak = albumKey(artist, album)
+        if (ak.isNotEmpty() && o.has(ak)) return o.optInt(ak) to Src.ALBUM
+        val rk = artistKey(artist)
+        if (rk.isNotEmpty() && o.has(rk)) return o.optInt(rk) to Src.ARTIST
+        if (ak.isNotEmpty()) {
+            val links = o.optJSONObject("@album") ?: JSONObject()
+            val vals = links.keys().asSequence().filter { links.optString(it) == ak && it != key && o.has(it) }.map { o.optInt(it) }.toList()
+            if (vals.size >= 2 && vals.max() - vals.min() <= 300) return (vals.average() / 50).toInt() * 50 to Src.GUESS
+        }
+        return 0 to Src.NONE
+    }
+
+    fun set(c: Context, key: String, ms: Int, artist: String = "", album: String = "") {
         if (key.isEmpty()) return
         val o = read(c)
-        if (ms == 0) o.remove(key) else o.put(key, ms)
-        file(c).writeText(o.toString())
+        val links = o.optJSONObject("@album") ?: JSONObject()
+        if (ms == 0) { o.remove(key); links.remove(key) }
+        else { o.put(key, ms); albumKey(artist, album).takeIf { it.isNotEmpty() }?.let { links.put(key, it) } }
+        o.put("@album", links)
+        write(c, o)
+    }
+
+    /** album- or artist-wide default; 0 removes it */
+    fun setScope(c: Context, scopeKey: String, ms: Int) {
+        if (scopeKey.isEmpty()) return
+        val o = read(c)
+        if (ms == 0) o.remove(scopeKey) else o.put(scopeKey, ms)
+        write(c, o)
     }
 }
 

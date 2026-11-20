@@ -24,10 +24,13 @@ class Surface {
 }
 
 data class LyricsStyle(val size: Int = 1, val red: Boolean = true, val context: Boolean = true, val controls: Boolean = true,
-                       val playing: Boolean = false, val seek: Boolean = true, val radius: Float = 28f) {
+                       val playing: Boolean = false, val seek: Boolean = true, val radius: Float = 28f, val accent: Int = Renderers.RED) {
     companion object {
-        fun from(c: Context, playing: Boolean) =
-            LyricsStyle(Prefs.lyrSize(c), Prefs.lyrRed(c), Prefs.lyrContext(c), Prefs.lyrControls(c), playing, Prefs.lyrSeek(c))
+        fun from(c: Context, playing: Boolean): LyricsStyle {
+            val red = Prefs.lyrRed(c)
+            return LyricsStyle(Prefs.lyrSize(c), red, Prefs.lyrContext(c), Prefs.lyrControls(c), playing, Prefs.lyrSeek(c),
+                accent = if (red) Accent.current(c) else Renderers.WHITE)
+        }
     }
 }
 
@@ -39,6 +42,7 @@ object Renderers {
     const val WHITE = 0xFFF2F2F2.toInt()
     const val DIM = 0xFF5A5A5A.toInt()
     private const val UNSUNG = 0xFF6E6E6E.toInt()
+    private const val SUB = 0xFFB4B4B4.toInt()
     /** top dot of a column is brightest; steep trail below (measured from the reference widget) */
     private val BAR_FADE = floatArrayOf(1f, .76f, .46f, .24f, .14f)
 
@@ -87,11 +91,12 @@ object Renderers {
      * prev/t drive the line-change slide (t 0..1), [pos] already includes the per-song latency.
      */
     fun lyrics(ctx: Context, surf: Surface, w: Int, h: Int, d: Float, lines: List<LrcLine>, pos: Double, status: String?,
-               prev: Int = -2, t: Float = 1f, st: LyricsStyle = LyricsStyle(), hits: MutableList<LineHit>? = null): Bitmap {
+               prev: Int = -2, t: Float = 1f, st: LyricsStyle = LyricsStyle(), hits: MutableList<LineHit>? = null,
+               subs: List<String>? = null): Bitmap {
         hits?.clear()
         fonts(ctx)
         val cv = surf.begin(w, h)
-        val accent = if (st.red) RED else WHITE
+        val accent = st.accent
         val p = lp
         p.reset(); p.isAntiAlias = true
         p.color = Color.BLACK
@@ -144,14 +149,19 @@ object Renderers {
             var size = minOf(30f * scale, maxOf(14f * scale, area / d * 0.2f * scale))
             var wrapped: List<String>
             val textW = maxW - 14 * d
+            // translation / romanization under the line: smaller, grey, one row each (max 2)
+            val sub = subs?.getOrNull(i)?.takeIf { it.isNotBlank() }?.split("\n")?.take(2) ?: emptyList()
+            fun subSize(sz: Float) = maxOf(10f, sz * 0.5f)
+            fun subH(sz: Float) = if (sub.isEmpty()) 0f else 4 * d + sub.size * subSize(sz) * 1.35f * d
             while (true) {
                 p.textSize = size * d
                 wrapped = wrap(p, cur, textW)
-                if ((wrapped.size <= maxLines && wrapped.size * size * 1.2f * d <= area * .72f) || size <= 11f) break
+                if ((wrapped.size <= maxLines && wrapped.size * size * 1.2f * d + subH(size) <= area * .72f) || size <= 11f) break
                 size -= 1f
             }
+            p.textSize = size * d
             val lh = size * 1.2f * d
-            val curH = wrapped.size * lh
+            val curH = wrapped.size * lh + subH(size)
             val y0 = top + (area - curH) / 2
             // karaoke: chars sung so far (whole line when the line has no word timings)
             val karaoke = live && line != null && line.words.isNotEmpty()
@@ -174,6 +184,13 @@ object Renderers {
                     }
                 }
                 charStart += seg.length + 1
+            }
+            if (sub.isNotEmpty()) {
+                val ss = subSize(size)
+                p.typeface = reg; p.textSize = ss * d; p.color = SUB
+                var sy = y0 + wrapped.size * lh + 4 * d
+                for (l in sub) { sy += ss * 1.35f * d; cv.drawText(ell(l, p, textW), pad + 14 * d, sy - ss * .3f * d, p) }
+                p.typeface = bold; p.textSize = size * d
             }
             p.color = accent
             cv.drawCircle(pad + 4 * d, y0 + size * d * 0.6f, 3.5f * d, p)
@@ -216,6 +233,9 @@ object Renderers {
     }
 
     private val ap = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+    private const val PROG_PAD_DP = 14f
+    /** dots in the cover's progress line: one per ~6 dp; the widget only redraws when a dot fills */
+    fun progressDots(w: Int, d: Float) = ((w - 2 * PROG_PAD_DP * d) / (6 * d)).toInt().coerceAtLeast(8)
     private val artSrc = Rect()
     private val artDst = RectF()
     private val artClip = Path()
@@ -226,7 +246,7 @@ object Renderers {
      * widget_art.xml the launcher runs. Main thread only.
      */
     fun art(ctx: Context, surf: Surface, w: Int, h: Int, d: Float, art: Bitmap?, title: String, artist: String, playing: Boolean, red: Boolean,
-            radiusDp: Float = Prefs.artRadius(ctx).toFloat()): Bitmap {
+            radiusDp: Float = Prefs.artRadius(ctx).toFloat(), progress: Float = -1f, accent: Int = RED): Bitmap {
         fonts(ctx)
         val cv = surf.begin(w, h)
         val p = ap
@@ -244,7 +264,7 @@ object Renderers {
             cv.drawBitmap(art, artSrc, artDst, p)
         } else {
             val pad = 16 * d
-            p.color = if (red) RED else WHITE; cv.drawCircle(pad + 3 * d, pad + 4.5f * d, 3 * d, p)
+            p.color = if (red) accent else WHITE; cv.drawCircle(pad + 3 * d, pad + 4.5f * d, 3 * d, p)
             p.typeface = bold; p.color = WHITE; p.textSize = 22 * d
             val tl = wrap(p, title.ifEmpty { "NO MUSIC" }, w - 2 * pad).take(3)
             var y = h - pad - (if (artist.isNotEmpty()) 18 * d else 0f) - (tl.size - 1) * 24 * d
@@ -252,6 +272,19 @@ object Renderers {
             if (artist.isNotEmpty()) {
                 p.typeface = reg; p.textSize = 12 * d; p.color = DIM
                 cv.drawText(ell(artist, p, w - 2 * pad), pad, h - pad, p)
+            }
+        }
+        if (progress >= 0f && title.isNotEmpty()) {
+            // dotted progress line on a soft bottom scrim, under the eq (which sits 17 dp up)
+            val sh = 26 * d
+            p.shader = LinearGradient(0f, h - sh, 0f, h.toFloat(), 0x00000000, 0x99000000.toInt(), Shader.TileMode.CLAMP)
+            cv.drawRect(0f, h - sh, w.toFloat(), h.toFloat(), p); p.shader = null
+            val n = progressDots(w, d)
+            val step = (w - 2 * PROG_PAD_DP * d) / n; val y = h - 8 * d
+            val done = (progress.coerceIn(0f, 1f) * n).toInt()
+            for (k in 0 until n) {
+                p.color = when { k < done -> WHITE; k == done -> accent; else -> 0x59FFFFFF }
+                cv.drawCircle(PROG_PAD_DP * d + step * (k + .5f), y, (if (k == done) 1.8f else 1.3f) * d, p)
             }
         }
         if (title.isNotEmpty() && !playing) {
@@ -265,18 +298,22 @@ object Renderers {
 
     /**
      * Grid of rows x cols round dots. levels/caps 0..1 per column. Paint passed in so each thread has its own.
+     * Styles (Prefs.VIZ_*): dots, bars (with peak caps), mirror (bars growing both ways from the middle), wave (one lit
+     * dot per column with a soft trail), ring (spokes around a circle, see [ring]).
      * Fast path: the bitmap is reused and only columns whose dots changed since the last frame are repainted
      * (measured: plain anti-aliased circles beat bitmap-sprite blits on this phone).
      */
     fun viz(surf: Surface, p: Paint, w: Int, h: Int, levels: FloatArray, caps: FloatArray?, cols: Int, rows: Int,
-            red: Boolean, idle: Boolean, bars: Boolean): Bitmap {
+            lit: Int, idle: Boolean, style: Int): Bitmap {
+        if (style == Prefs.VIZ_RING && !idle) return ring(surf, p, w, h, levels, cols, lit)
+        val bars = style != Prefs.VIZ_DOTS
         val pad = minOf(w, h) * .1f
         val cell = minOf((w - 2 * pad) / cols, (h - 2 * pad) / rows)
         val ox = (w - cell * cols) / 2; val oy = (h - cell * rows) / 2
         val rad = cell * .38f
         val cardColor = if (bars) 0xFF19191A.toInt() else 0xFF1B1B1B.toInt()
         val offColor = if (bars) 0xFF232325.toInt() else 0xFF262626.toInt()
-        val key = "$w,$h,$cols,$rows,$bars"
+        val key = "$w,$h,$cols,$rows,$style"
         val fresh = surf.vizKey != key || surf.bmp == null || surf.bmp!!.width != w || surf.bmp!!.height != h
         val cv = surf.begin(w, h, clear = fresh)
         p.reset(); p.isAntiAlias = true
@@ -286,28 +323,32 @@ object Renderers {
             cv.drawRoundRect(0f, 0f, w.toFloat(), h.toFloat(), r, r, p)
             surf.colSig = IntArray(cols) { Int.MIN_VALUE }; surf.vizKey = key
         }
-        val lit = if (red) RED else Color.WHITE
-        val capColor = if (red) WHITE else RED
+        val capColor = if (lit != WHITE && lit != Color.WHITE) WHITE else RED
         val vals = IntArray(rows)              // per row: 0 = off, else alpha | (1 shl 9 when cap colour)
         var any = false
         for (c in 0 until cols) {
             val lvl = if (idle) 0f else levels.getOrElse(c) { 0f }.coerceIn(0f, 1f)
             val pos = lvl * rows
-            val capRow = if (!idle && caps != null && bars) (caps.getOrElse(c) { 0f } * rows).toInt().coerceAtMost(rows - 1) else -1
+            val capRow = if (!idle && caps != null && style == Prefs.VIZ_BARS) (caps.getOrElse(c) { 0f } * rows).toInt().coerceAtMost(rows - 1) else -1
             var sig = 17
             for (row in 0 until rows) {
-                val dist = pos - (row + 1)
                 val v = when {
                     row == capRow && row >= pos.toInt() && capRow > 0 -> 255 or (1 shl 9)
                     idle -> if (playHint(c, row, cols, rows)) 82 else 0
                     else -> {
-                        val b = if (!bars) {
-                            val n = Math.round(pos); val k = n - 1 - row
-                            if (row < n) maxOf(.2f, 1 - k * .17f) else 0f
-                        } else if (dist >= 0f) {
-                            val i0 = dist.toInt().coerceAtMost(BAR_FADE.size - 1); val i1 = minOf(i0 + 1, BAR_FADE.size - 1)
-                            BAR_FADE[i0] + (BAR_FADE[i1] - BAR_FADE[i0]) * (dist - i0).coerceIn(0f, 1f)
-                        } else if (dist > -1f) (1 + dist) * BAR_FADE[0] else 0f
+                        val b = when (style) {
+                            Prefs.VIZ_DOTS -> { val n = Math.round(pos); val k = n - 1 - row; if (row < n) maxOf(.2f, 1 - k * .17f) else 0f }
+                            Prefs.VIZ_MIRROR -> {
+                                // distance of this row from the middle, level spreads both ways
+                                val half = rows / 2f; val dc = Math.abs(row + .5f - half)
+                                barFade(lvl * half - dc - .5f)
+                            }
+                            Prefs.VIZ_WAVE -> {
+                                val at = lvl * (rows - 1); val dd = Math.abs(row - at)
+                                if (lvl < 0.02f) 0f else if (dd < 1f) 1f - dd * .55f else if (dd < 2f) (2f - dd) * .3f else 0f
+                            }
+                            else -> barFade(pos - (row + 1))
+                        }
                         if (b > 0.02f) ((b * 255).toInt() and 0xF8).coerceAtLeast(8) else 0   // quantised: tiny changes don't redraw
                     }
                 }
@@ -332,6 +373,41 @@ object Renderers {
             }
         }
         surf.changed = any || fresh
+        return surf.bmp!!
+    }
+
+    /** bars brightness for a dot [dist] rows below the top of the bar (negative = above it) */
+    private fun barFade(dist: Float): Float = if (dist >= 0f) {
+        val i0 = dist.toInt().coerceAtMost(BAR_FADE.size - 1); val i1 = minOf(i0 + 1, BAR_FADE.size - 1)
+        BAR_FADE[i0] + (BAR_FADE[i1] - BAR_FADE[i0]) * (dist - i0).coerceIn(0f, 1f)
+    } else if (dist > -1f) (1 + dist) * BAR_FADE[0] else 0f
+
+    /** Ring: 2 x cols spokes (bands mirrored left/right) of dots growing outward from a circle. Full redraw per frame. */
+    private fun ring(surf: Surface, p: Paint, w: Int, h: Int, levels: FloatArray, cols: Int, lit: Int): Bitmap {
+        val cv = surf.begin(w, h)
+        surf.vizKey = ""   // grid styles must start fresh after this
+        p.reset(); p.isAntiAlias = true
+        p.color = 0xFF19191A.toInt()
+        val r = minOf(w, h) * 0.12f
+        cv.drawRoundRect(0f, 0f, w.toFloat(), h.toFloat(), r, r, p)
+        val cx = w / 2f; val cy = h / 2f; val big = minOf(w, h) / 2f
+        val inner = big * .34f; val steps = 5; val stepLen = (big * .9f - inner) / steps
+        val spokes = cols * 2
+        val dot = minOf(stepLen * .32f, (2 * Math.PI * inner / spokes).toFloat() * .32f)
+        for (k in 0 until spokes) {
+            // band index mirrored so bass sits at the top and both halves match
+            val band = if (k < cols) k else spokes - 1 - k
+            val lvl = levels.getOrElse(band) { 0f }.coerceIn(0f, 1f)
+            val a = Math.PI * 2 * (k + .5) / spokes - Math.PI / 2
+            val dx = Math.cos(a).toFloat(); val dy = Math.sin(a).toFloat()
+            for (sIdx in 0 until steps) {
+                val b = barFade(lvl * steps - (sIdx + 1))
+                p.color = if (b > 0.02f) Color.argb((b * 255).toInt(), Color.red(lit), Color.green(lit), Color.blue(lit)) else 0xFF232325.toInt()
+                val rr = inner + stepLen * (sIdx + .5f)
+                cv.drawCircle(cx + dx * rr, cy + dy * rr, dot, p)
+            }
+        }
+        surf.changed = true
         return surf.bmp!!
     }
 

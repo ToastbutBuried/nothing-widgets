@@ -15,9 +15,12 @@ object Prefs {
     /** sensitivity multiplier 0.5..4 */
     fun gain(c: Context) = p(c).getFloat("gain", 1.5f)
     fun setGain(c: Context, v: Float) = p(c).edit().putFloat("gain", v).apply()
-    /** true = "bars" style (snappy, steep trail), false = original dots */
-    fun bars(c: Context) = b(c, "bars", true)
-    fun setBars(c: Context, v: Boolean) = setB(c, "bars", v)
+    /** 0 dots, 1 bars, 2 mirror, 3 wave, 4 ring. Old installs only had the "bars" switch. */
+    fun vizStyle(c: Context) = p(c).getInt("vizStyle", if (b(c, "bars", true)) VIZ_BARS else VIZ_DOTS)
+    fun setVizStyle(c: Context, v: Int) = setI(c, "vizStyle", v)
+    /** smoothed (cava) levels: every style but plain dots */
+    fun bars(c: Context) = vizStyle(c) != VIZ_DOTS
+    const val VIZ_DOTS = 0; const val VIZ_BARS = 1; const val VIZ_MIRROR = 2; const val VIZ_WAVE = 3; const val VIZ_RING = 4
     /** 0 = auto (from widget shape), else 8 / 12 / 16 */
     fun bands(c: Context) = i(c, "bands", 0)
     fun setBands(c: Context, v: Int) = setI(c, "bands", v)
@@ -46,6 +49,42 @@ object Prefs {
     /** corner radius in dp; 19 matches Nothing's own music widget (measured on the phone) */
     fun artRadius(c: Context) = i(c, "artRadius", 19)
     fun setArtRadius(c: Context, v: Int) = setI(c, "artRadius", v)
+
+    /** thin dotted progress line along the bottom of the cover */
+    fun artProgress(c: Context) = b(c, "artProg", true)
+    fun setArtProgress(c: Context, v: Boolean) = setB(c, "artProg", v)
+
+    // look
+    /** accent (red everywhere) taken from the album cover instead */
+    fun accentCover(c: Context) = b(c, "accCover", false)
+    fun setAccentCover(c: Context, v: Boolean) = setB(c, "accCover", v)
+
+    // lyrics extras
+    /** second line under the current lyric: 0 off, 1 translation, 2 romanized, 3 both */
+    fun trMode(c: Context) = i(c, "trMode", 0)
+    fun setTrMode(c: Context, v: Int) = setI(c, "trMode", v)
+    /** translate into this language (ISO code); "" = phone language */
+    fun trLang(c: Context): String = p(c).getString("trLang", "")!!.ifEmpty { java.util.Locale.getDefault().language }
+    fun setTrLang(c: Context, v: String) = p(c).edit().putString("trLang", v).apply()
+    /** current line as a silent notification (lock screen / shade) */
+    fun lockLyrics(c: Context) = b(c, "lockLyr", false)
+    fun setLockLyrics(c: Context, v: Boolean) = setB(c, "lockLyr", v)
+
+    // apps
+    /** media apps the widgets ignore (package names) */
+    fun ignoredApps(c: Context): Set<String> = p(c).getStringSet("ignApps", emptySet())!!.toSet()
+    fun setIgnoredApps(c: Context, v: Set<String>) = p(c).edit().putStringSet("ignApps", v).apply()
+    /** every media app seen so far, for the filter list */
+    fun seenApps(c: Context): Set<String> = p(c).getStringSet("seenApps", emptySet())!!.toSet()
+    fun addSeenApp(c: Context, pkg: String) { val s = seenApps(c); if (pkg !in s) p(c).edit().putStringSet("seenApps", s + pkg).apply() }
+
+    /** look presets saved by the user: JSON {name: {prefKey: value}} */
+    fun presets(c: Context): String = p(c).getString("presets", "{}")!!
+    fun setPresets(c: Context, v: String) = p(c).edit().putString("presets", v).apply()
+
+    /** raw access for presets and backup */
+    fun all(c: Context): Map<String, *> = p(c).all
+    fun editor(c: Context): android.content.SharedPreferences.Editor = p(c).edit()
 
     // cache
     /** album art cache cap in MB, 0 = unlimited (~80 KB a cover, so 75 MB is ~900 covers) */

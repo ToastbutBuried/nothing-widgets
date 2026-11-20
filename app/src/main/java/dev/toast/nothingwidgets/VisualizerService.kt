@@ -35,13 +35,15 @@ class VisualizerService : Service() {
 
     /** Things that change rarely: read once a second instead of every frame. */
     private class Config(val ids: IntArray, val w: Int, val h: Int, val cols: Int, val rows: Int,
-                         val bars: Boolean, val red: Boolean, val gain: Float, val peaks: Boolean)
+                         val style: Int, val lit: Int, val gain: Float, val peaks: Boolean) {
+        val bars get() = style != Prefs.VIZ_DOTS
+    }
 
     private fun config(mgr: AppWidgetManager): Config {
         val ids = mgr.getAppWidgetIds(ComponentName(this, VizWidgetProvider::class.java))
         val (w, h, _) = if (ids.isNotEmpty()) Renderers.sizePx(this, ids[0], 110, 110, CAP_PX) else Triple(1, 1, 1f)
         val (cols, rows) = Renderers.grid(Prefs.bands(this), w, h)
-        return Config(ids, w, h, cols, rows, Prefs.bars(this), Prefs.red(this), Prefs.gain(this), Prefs.peaks(this))
+        return Config(ids, w, h, cols, rows, Prefs.vizStyle(this), vizColor(this), Prefs.gain(this), Prefs.peaks(this))
     }
 
     private fun loop() {
@@ -82,7 +84,7 @@ class VisualizerService : Service() {
             if (energy > QUIET) quietSince = 0L else if (quietSince == 0L) quietSince = now
             val quietFor = if (quietSince == 0L) 0L else now - quietSince
             if (quietFor > 30_000) { stopReason = "IDLE"; stopSelf(); break }
-            val bmp = Renderers.viz(surf, paint, cfg.w, cfg.h, levels, if (cfg.peaks) cava.caps else null, cfg.cols, cfg.rows, cfg.red, false, cfg.bars)
+            val bmp = Renderers.viz(surf, paint, cfg.w, cfg.h, levels, if (cfg.peaks) cava.caps else null, cfg.cols, cfg.rows, cfg.lit, false, cfg.style)
             if (surf.changed) {
                 // full update (layout + click) only when needed, then cheap bitmap-only frames
                 if (fullNext) { Renderers.push(this, bmp, cfg.ids) { it.setOnClickPendingIntent(R.id.img, click) }; fullNext = false }
@@ -111,5 +113,7 @@ class VisualizerService : Service() {
         @Volatile var failed = false
         /** why it last stopped: "", STOPPED, IDLE, NO WIDGET, UNSUPPORTED */
         @Volatile var stopReason = ""
+        /** dot colour: white, or the accent (red / cover colour) when "Red" is picked */
+        fun vizColor(c: Context): Int = if (Prefs.red(c)) Accent.current(c) else android.graphics.Color.WHITE
     }
 }

@@ -9,20 +9,27 @@ Dot-matrix home-screen widgets for Nothing phones (built on a Phone (3a) Lite, w
 **Lyrics** - synced lyrics for whatever is playing in any music app, fetched from [LRCLIB](https://lrclib.net).
 Word-by-word karaoke fill when the lyrics have word timings, previous/next lines for context, ⏮ ⏯ ⏭ buttons,
 tap a line to jump to it. Per-song timing offset and a lyrics picker in the app. Save lyrics to keep them for good,
-or export them as a `.lrc` file. Resizes freely.
+export them as a `.lrc` file or import your own. Resizes freely.
+- optional second line: translation and/or romanization (Google Translate, sent once per song, then cached)
+- timing offsets can be set for a whole album or artist; when two songs of an album agree, the rest is guessed from them
+- optional lock-screen line: the current lyric as a silent notification
 
 **Artwork** - the album cover with Nothing's little animated dot eq while playing.
 - swipe left / right: next / previous track (the card follows your finger)
 - swipe up: lyrics, swipe down: back to the cover
 - tap: pause / play
 - long-press: the launcher's resize / remove menu
+- optional dotted progress line along the bottom
 
 Home-screen widgets can only receive taps, so the swipes come from an optional accessibility service
 ("Nothing Widgets swipes") that lays an invisible touch layer over this one widget while the home screen is showing.
 It reads nothing else. Without it, tapping still pauses.
 
-**Visualizer** - cava-style dot visualizer of what the phone is playing (dots or bars, white or red, 8-16 bands, peak caps).
-Uses the audio output mix, not the microphone. 2×2 and up.
+**Visualizer** - cava-style dot visualizer of what the phone is playing (dots, bars, mirror, wave or ring; white or accent;
+8-16 bands, peak caps). Uses the audio output mix, not the microphone. 2×2 and up.
+
+**Everywhere** - look presets (Nothing, Mono, Cover, Minimal, or save your own), accent colour taken from the album cover,
+Quick Settings tiles (visualizer on/off, artwork cover/lyrics), ignore chosen media apps, backup/restore of all settings and saved lyrics.
 
 **Cache** - covers and lyrics of songs you played are kept so they show instantly and offline. Each has its own size cap
 (slider, default 75 MB covers / 10 MB lyrics, far right = unlimited); the least recently played go first.

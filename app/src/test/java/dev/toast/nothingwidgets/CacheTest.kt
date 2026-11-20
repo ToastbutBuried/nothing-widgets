@@ -49,3 +49,19 @@ class CacheKeyTest {
         assertEquals(DiskCache.key("Creep", "Radiohead"), DiskCache.key("Creep|Radiohead"))
     }
 }
+
+class TranslatorTest {
+    @Test fun splitsKeepLineCount() {
+        assertEquals(listOf("tell me your name", "the sky is blue"), Translator.splitTranslated("tell me your name\nthe sky is blue", 2))
+        assertNull(Translator.splitTranslated("one line only", 2))
+        assertEquals(listOf("Kimi no namae o oshiete", "sora ga aoi"), Translator.splitRoman("Kimi no namae o oshiete | sora ga aoi", 2))
+        assertEquals(listOf("a", "b", "c"), Translator.splitRoman("a### b| c".replace("###", "|"), 3))
+    }
+    @Test fun chunksStayUnderLimit() {
+        val lines = List(100) { "x".repeat(50) }
+        val ch = Translator.chunks(lines, max = 1000)
+        assertEquals(100, ch.sumOf { it.size })
+        assertTrue(ch.all { c -> c.sumOf { it.length + 3 } <= 1000 })
+        assertEquals(listOf(listOf("a", "b")), Translator.chunks(listOf("a", "b")))
+    }
+}

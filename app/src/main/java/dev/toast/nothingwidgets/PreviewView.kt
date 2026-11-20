@@ -28,7 +28,7 @@ class PreviewView(ctx: android.content.Context) : android.view.View(ctx) {
         val bars = Prefs.bars(context)
         val g = Prefs.gain(context) / 1.5f
         val lv = if (bars) cava.process(raw, dt, g) else FloatArray(cols) { (raw[it] * g).coerceIn(0f, 1f) }
-        val bmp = Renderers.viz(surf, paint, w, h, lv, if (Prefs.peaks(context)) cava.caps else null, cols, rows, Prefs.red(context), false, bars)
+        val bmp = Renderers.viz(surf, paint, w, h, lv, if (Prefs.peaks(context)) cava.caps else null, cols, rows, VisualizerService.vizColor(context), false, Prefs.vizStyle(context))
         c.drawBitmap(bmp, (width - w) / 2f, 0f, null)
         postInvalidateOnAnimation()
     }

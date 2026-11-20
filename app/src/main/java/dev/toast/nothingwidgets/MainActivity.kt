@@ -27,6 +27,11 @@ import android.widget.*
 class MainActivity : Activity() {
     private companion object {
         const val REQ_EXPORT = 7
+        const val REQ_IMPORT_LRC = 8
+        const val REQ_BACKUP_OUT = 9
+        const val REQ_BACKUP_IN = 10
+        /** scroll position to restore after recreate() (presets, restore), so the screen doesn't jump to the top */
+        var keepScroll = -1
         /** cap stops in MB; 0 = unlimited, always the far right */
         val ART_CAPS = listOf(10, 25, 50, 75, 100, 150, 200, 300, 500, 0)
         val LYR_CAPS = listOf(1, 2, 5, 10, 25, 50, 100, 0)
@@ -59,7 +64,11 @@ class MainActivity : Activity() {
     private lateinit var artUse: TextView
     private lateinit var lyrUse: TextView
     private lateinit var savedInfo: TextView
+    private lateinit var latLabel: TextView
+    private lateinit var appsBox: LinearLayout
+    private lateinit var langPill: TextView
     private var pendingExport: String? = null
+    private var scroller: ScrollView? = null
     private var ticks = 0
     private var dragging = false
 
@@ -124,6 +133,29 @@ class MainActivity : Activity() {
         return row(*pills.toTypedArray(), gap = 6)
     }
 
+    /** Segmented control wrapped onto rows of [perRow]; a short last row keeps the same pill width. */
+    private fun segmentedGrid(options: List<String>, selected: Int, perRow: Int, color: Int = Renderers.WHITE,
+                              onLong: ((Int) -> Unit)? = null, onSelect: (Int) -> Unit): LinearLayout {
+        val pills = ArrayList<TextView>()
+        options.forEachIndexed { i, o ->
+            pills.add(pill(o) { pills.forEachIndexed { k, p -> stylePill(p, k == i, color) }; onSelect(i) }.apply {
+                maxLines = 1; ellipsize = TextUtils.TruncateAt.END
+                if (onLong != null) setOnLongClickListener { onLong(i); true }
+            })
+        }
+        pills.forEachIndexed { k, p -> stylePill(p, k == selected, color) }
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            pills.chunked(perRow).forEachIndexed { r, chunk ->
+                val cells: List<View> = chunk + List(perRow - chunk.size) { View(context) }
+                if (r > 0) addView(space(6))
+                addView(row(*cells.toTypedArray(), gap = 6))
+            }
+        }
+    }
+
+    private fun onOff(v: Boolean) = if (v) 0 else 1
+
     private fun slider(max: Int, value: Int, onChange: (Int, Boolean) -> Unit) = SeekBar(this).apply {
         this.max = max; progress = value
         progressTintList = ColorStateList.valueOf(Renderers.RED)
@@ -179,22 +211,32 @@ class MainActivity : Activity() {
         }
         saveBtn = pill("Save") { toggleSave() }
         val exportBtn = pill("Export") { exportLyrics() }
+        val importBtn = pill("Import") { importLyrics() }
+        val albumBtn = pill("For album") {
+            val s = svc() ?: return@pill
+            if (s.latencyForAll(true)) toast("${latText(s.latencyMs)} for every song of ${s.album()} without its own value") else toast("This song has no album info")
+        }
+        val artistBtn = pill("For artist") {
+            val s = svc() ?: return@pill
+            if (s.latencyForAll(false)) toast("${latText(s.latencyMs)} for every song by ${s.artist()} without its own value") else toast("No artist info")
+        }
         val pickBtn = pill("Pick lyrics", primary = true) { listFinds() }
         val searchBtn = pill("Search manually") { manualSearch() }
         val resetBtn = pill("Reset") { latBar.progress = 100; setLatency(0) }
-        lyricControls = listOf(refreshBtn, pickBtn, searchBtn, saveBtn, exportBtn, minus, plus, resetBtn, latBar)
+        lyricControls = listOf(refreshBtn, pickBtn, searchBtn, saveBtn, exportBtn, importBtn, minus, plus, resetBtn, latBar, albumBtn, artistBtn)
+        latLabel = text("LATENCY · THIS SONG", 10f, LABEL, dotoB).apply { letterSpacing = .18f }
         add(card().apply {
             addView(header("Lyrics", lyrState)); addView(space(16))
             addView(text("NOW PLAYING", 10f, LABEL, dotoB).apply { letterSpacing = .18f }); addView(space(6))
             addView(trackTitle); addView(space(4)); addView(trackArtist); addView(space(16))
             addView(row(refreshBtn, pickBtn)); addView(space(8)); addView(searchBtn, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)); addView(space(8))
-            addView(row(saveBtn, exportBtn)); addView(space(8))
-            addView(text("Save keeps these lyrics for good, also offline and after clearing the cache. Picked lyrics are saved automatically.", 11f, Renderers.DIM)); addView(space(22))
+            addView(row(saveBtn, exportBtn, importBtn, gap = 6)); addView(space(8))
+            addView(text("Save keeps these lyrics for good, also offline and after clearing the cache. Picked and imported lyrics are saved automatically. Import takes a .lrc or plain .txt file.", 11f, Renderers.DIM)); addView(space(22))
             addView(LinearLayout(context).apply {
                 orientation = LinearLayout.HORIZONTAL; gravity = Gravity.BOTTOM
                 addView(LinearLayout(context).apply {
                     orientation = LinearLayout.VERTICAL
-                    addView(text("LATENCY · THIS SONG", 10f, LABEL, dotoB).apply { letterSpacing = .18f }); addView(space(6))
+                    addView(latLabel); addView(space(6))
                     addView(latValue)
                 }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
                 addView(resetBtn)
@@ -204,9 +246,13 @@ class MainActivity : Activity() {
                 addView(minus, LinearLayout.LayoutParams(dp(48), dp(40)))
                 addView(latBar, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
                 addView(plus, LinearLayout.LayoutParams(dp(48), dp(40)))
-            }); addView(space(8))
-            addView(text("+ shows lyrics earlier, − later. Saved per song and reapplied when it plays again.", 11f, Renderers.DIM))
+            }); addView(space(10))
+            addView(row(albumBtn, artistBtn)); addView(space(8))
+            addView(text("+ shows lyrics earlier, − later. Saved per song. \"For album / artist\" makes it the default for songs without their own value; when two songs of an album agree, the rest of it gets their timing as a guess.", 11f, Renderers.DIM))
         })
+
+        // look: presets + accent
+        add(lookCard())
 
         // lyrics widget look
         fun lyrChanged() { MediaListenerService.instance?.redraw() ?: LyricsWidgetProvider.draw(this,
@@ -218,7 +264,27 @@ class MainActivity : Activity() {
             addView(sub("CONTEXT LINES")); addView(segmented(listOf("On", "Off"), if (Prefs.lyrContext(context)) 0 else 1) { Prefs.setLyrContext(context, it == 0); lyrChanged() }); addView(space(14))
             addView(sub("PLAYER BUTTONS")); addView(segmented(listOf("On", "Off"), if (Prefs.lyrControls(context)) 0 else 1) { Prefs.setLyrControls(context, it == 0); lyrChanged() }); addView(space(14))
             addView(sub("TAP TO SEEK")); addView(segmented(listOf("On", "Off"), if (Prefs.lyrSeek(context)) 0 else 1) { Prefs.setLyrSeek(context, it == 0); lyrChanged() }); addView(space(8))
-            addView(text("Tap a lyric line to jump to it (synced lyrics only), anywhere else to open this screen; ⏮ ⏯ ⏭ sit bottom right. Word-by-word fill shows when LRCLIB has word timings.", 11f, Renderers.DIM))
+            addView(text("Tap a lyric line to jump to it (synced lyrics only), anywhere else to open this screen; ⏮ ⏯ ⏭ sit bottom right. Word-by-word fill shows when LRCLIB has word timings.", 11f, Renderers.DIM)); addView(space(18))
+            addView(sub("SECOND LINE"))
+            addView(segmentedGrid(listOf("Off", "Translate", "Romanize", "Both"), Prefs.trMode(context), 2) {
+                Prefs.setTrMode(context, it); MediaListenerService.instance?.subsChanged() }); addView(space(10))
+            langPill = pill("") { pickLanguage() }
+            addView(LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+                addView(text("TRANSLATE TO", 10f, LABEL, dotoB).apply { letterSpacing = .18f }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+                addView(langPill)
+            }); addView(space(8))
+            addView(text("Shown small under the current line, only for songs not already in that language (romanize: non-Latin scripts). Uses Google Translate: the lyric lines are sent once per song, then cached.", 11f, Renderers.DIM)); addView(space(18))
+            addView(sub("LOCK SCREEN LINE")); addView(segmented(listOf("On", "Off"), onOff(Prefs.lockLyrics(context))) {
+                Prefs.setLockLyrics(context, it == 0)
+                if (it == 0 && android.os.Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
+                    requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 2)
+                MediaListenerService.instance?.redraw() }); addView(space(8))
+            addView(text("The current line as a silent notification, so it shows on the lock screen while music plays. Whether it reaches the always-on display depends on Nothing OS's lock screen settings.", 11f, Renderers.DIM))
+            if (lockScreenHidesNotifications()) {
+                addView(space(8))
+                addView(text("Your lock screen hides notifications, so the line will only show in the notification shade. Turn them on in Settings › Notifications › Lock screen.", 11f, Renderers.RED))
+            }
         })
 
         // artwork widget
@@ -239,8 +305,11 @@ class MainActivity : Activity() {
                 MediaListenerService.instance?.artChanged() ?: ArtWidgetProvider.draw(context, ArtWidgetProvider.ids(context))
             }); addView(space(4))
             addView(text("19 dp matches Nothing's own widgets.", 11f, Renderers.DIM)); addView(space(16))
+            addView(sub("PROGRESS DOTS")); addView(segmented(listOf("On", "Off"), onOff(Prefs.artProgress(context))) {
+                Prefs.setArtProgress(context, it == 0); MediaListenerService.instance?.artChanged() }); addView(space(16))
             addView(swipePill, LinearLayout.LayoutParams(MATCH_PARENT, dp(48))); addView(space(8))
             addView(text("Widgets can't receive swipes on their own, so an accessibility service lays an invisible touch layer over this one widget while the home screen shows. Without it a tap still pauses.", 11f, Renderers.DIM))
+            tileButton(this, ArtTile::class.java, "Artwork lyrics")
         })
 
         // visualizer
@@ -252,18 +321,28 @@ class MainActivity : Activity() {
             addView(header("Visualizer", vizState)); addView(space(16))
             addView(preview, LinearLayout.LayoutParams(MATCH_PARENT, dp(240))); addView(space(18))
             addView(text("STYLE", 10f, LABEL, dotoB).apply { letterSpacing = .18f }); addView(space(8))
-            addView(segmented(listOf("Dots", "Bars"), if (Prefs.bars(context)) 1 else 0) { Prefs.setBars(context, it == 1); widgetsChanged() }); addView(space(14))
+            addView(segmentedGrid(listOf("Dots", "Bars", "Mirror", "Wave", "Ring"), Prefs.vizStyle(context), 3) { Prefs.setVizStyle(context, it); widgetsChanged() }); addView(space(14))
             addView(text("COLOUR", 10f, LABEL, dotoB).apply { letterSpacing = .18f }); addView(space(8))
-            addView(segmented(listOf("White", "Red"), if (Prefs.red(context)) 1 else 0) { Prefs.setRed(context, it == 1); widgetsChanged() }); addView(space(14))
+            addView(segmented(listOf("White", "Accent"), if (Prefs.red(context)) 1 else 0) { Prefs.setRed(context, it == 1); widgetsChanged() }); addView(space(14))
             addView(sub("BANDS")); val bandOpts = listOf(0, 8, 12, 16)
             addView(segmented(listOf("Auto", "8", "12", "16"), bandOpts.indexOf(Prefs.bands(context)).coerceAtLeast(0)) { Prefs.setBands(context, bandOpts[it]); widgetsChanged() }); addView(space(14))
-            addView(sub("PEAK CAPS")); addView(segmented(listOf("On", "Off"), if (Prefs.peaks(context)) 0 else 1) { Prefs.setPeaks(context, it == 0); widgetsChanged() }); addView(space(16))
+            addView(sub("PEAK CAPS · BARS ONLY")); addView(segmented(listOf("On", "Off"), if (Prefs.peaks(context)) 0 else 1) { Prefs.setPeaks(context, it == 0); widgetsChanged() }); addView(space(16))
             addView(header("Sensitivity", sensValue)); addView(space(4))
             addView(slider(100, ((Prefs.gain(context) - 0.5f) / 3.5f * 100).toInt()) { p, _ ->
                 val g = 0.5f + p / 100f * 3.5f; Prefs.setGain(context, g); sensValue.text = "%.1f×".format(g)
             }); addView(space(16))
             addView(vizButton, LinearLayout.LayoutParams(MATCH_PARENT, dp(48)))
+            tileButton(this, VizTile::class.java, "Visualizer")
         })
+
+        // apps
+        appsBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        add(card().apply {
+            addView(label("Apps")); addView(space(14))
+            addView(appsBox); addView(space(8))
+            addView(text("Ignored apps never take over the widgets, e.g. a podcast app or YouTube videos. Apps show up here once they've played something.", 11f, Renderers.DIM))
+        })
+        fillApps()
         sensValue.text = "%.1f×".format(Prefs.gain(this))
 
         // cache (housekeeping, so last)
@@ -286,12 +365,21 @@ class MainActivity : Activity() {
             addView(text("Covers and lyrics of songs you played, so they show instantly and offline. When a cap is full the least recently played go first.", 11f, Renderers.DIM))
         })
 
+        // backup
+        add(card().apply {
+            addView(label("Backup")); addView(space(14))
+            addView(row(pill("Export") { backupOut() }, pill("Import") { backupIn() })); addView(space(8))
+            addView(text("One file with every setting, per-song latency and your saved lyrics, e.g. before reinstalling. Covers and cached lyrics refill on their own.", 11f, Renderers.DIM))
+        })
+
         // footer
         val ver = try { packageManager.getPackageInfo(packageName, 0).versionName } catch (_: Exception) { "?" }
-        add(text("Add the widgets: long-press the home screen › Widgets › Nothing Widgets. Lyrics resizes freely; the visualizer is 2×2, tap it to start or stop. Both widgets resize.\n\nv$ver",
+        add(text("Add the widgets: long-press the home screen › Widgets › Nothing Widgets. All three resize; tap the visualizer to start or stop it. Quick Settings tiles: Visualizer and Artwork lyrics.\n\nv$ver",
             11f, Renderers.DIM).apply { setPadding(dp(4), 0, dp(4), 0); setLineSpacing(0f, 1.3f) }, 0)
 
         setContentView(ScrollView(this).apply {
+            scroller = this
+            if (keepScroll >= 0) { val y = keepScroll; keepScroll = -1; post { scrollTo(0, y) } }
             setBackgroundColor(Color.BLACK); isVerticalScrollBarEnabled = false; clipToPadding = true; addView(root)
             // targetSdk 35 draws edge-to-edge: keep content clear of the status and navigation bars
             setOnApplyWindowInsetsListener { v, insets ->
@@ -409,12 +497,170 @@ class MainActivity : Activity() {
     @Suppress("OVERRIDE_DEPRECATION")   // the androidx result API would be the only dependency
     override fun onActivityResult(req: Int, res: Int, data: Intent?) {
         super.onActivityResult(req, res, data)
-        if (req != REQ_EXPORT) return
-        val body = pendingExport; pendingExport = null
         val uri = data?.data
-        if (res != RESULT_OK || uri == null || body == null) return
-        try { contentResolver.openOutputStream(uri)?.use { it.write(body.toByteArray()) }; toast("Exported") }
-        catch (_: Exception) { toast("Export failed") }
+        if (req == REQ_EXPORT) { val body = pendingExport; pendingExport = null; if (body != null && res == RESULT_OK && uri != null) writeTo(uri, body, "Exported") }
+        if (res != RESULT_OK || uri == null) return
+        when (req) {
+            REQ_BACKUP_OUT -> Thread { val b = Backup.export(this); ui.post { writeTo(uri, b, "Backup saved") } }.start()
+            REQ_IMPORT_LRC -> {
+                val t = readFrom(uri) ?: return
+                val s = MediaListenerService.instance
+                if (s != null && s.importLyrics(t)) { toast("Imported and saved"); refresh() } else toast("Nothing to import")
+            }
+            REQ_BACKUP_IN -> {
+                val t = readFrom(uri) ?: return
+                AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert).setTitle("Restore backup?")
+                    .setMessage("Replaces all settings, per-song latency and saved lyrics on this phone.")
+                    .setPositiveButton("Restore") { _, _ ->
+                        try {
+                            val n = Backup.import(this, t)
+                            toast("Restored · $n saved songs")
+                            lookChanged(); MediaListenerService.instance?.reloadAll()
+                        } catch (e: Exception) { toast("Not a Nothing Widgets backup") }
+                    }.setNegativeButton("Cancel", null).show()
+            }
+        }
+    }
+
+    private fun writeTo(uri: android.net.Uri, body: String, ok: String) {
+        try { contentResolver.openOutputStream(uri)?.use { it.write(body.toByteArray()) }; toast(ok) } catch (_: Exception) { toast("Couldn't write the file") }
+    }
+
+    /** text files up to 2 MB */
+    private fun readFrom(uri: android.net.Uri): String? = try {
+        contentResolver.openInputStream(uri)?.use { s -> String(s.readNBytesCompat(2 shl 20)) }
+    } catch (_: Exception) { toast("Couldn't read the file"); null }
+
+    private fun java.io.InputStream.readNBytesCompat(max: Int): ByteArray {
+        val out = java.io.ByteArrayOutputStream(); val buf = ByteArray(8192); var n = 0
+        while (n < max) { val r = read(buf); if (r < 0) break; out.write(buf, 0, r); n += r }
+        return out.toByteArray()
+    }
+
+    private fun openDoc(req: Int, vararg types: String) {
+        val i = Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*").putExtra(Intent.EXTRA_MIME_TYPES, types)
+        try { startActivityForResult(i, req) } catch (_: Exception) { toast("No file picker on this phone") }
+    }
+
+    private fun importLyrics() { svc() ?: return; openDoc(REQ_IMPORT_LRC, "text/*", "application/octet-stream") }
+
+    private fun backupOut() {
+        val name = "nothing-widgets-backup-" + java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).format(java.util.Date()) + ".json"
+        val i = Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("application/json").putExtra(Intent.EXTRA_TITLE, name)
+        try { startActivityForResult(i, REQ_BACKUP_OUT) } catch (_: Exception) { toast("No file picker on this phone") }
+    }
+
+    private fun backupIn() = openDoc(REQ_BACKUP_IN, "application/json", "application/octet-stream", "text/*")
+
+    // ---------- look ----------
+    private fun lookCard(): LinearLayout = card().apply {
+        addView(label("Look")); addView(space(14))
+        val all = Presets.BUILT_IN + Presets.saved(context)
+        val own = Presets.BUILT_IN.size
+        addView(sub("PRESETS"))
+        addView(segmentedGrid(all.map { it.first }, all.indexOfFirst { Presets.matches(context, it.second) }, 2,
+            onLong = { i ->
+                if (i < own) return@segmentedGrid
+                AlertDialog.Builder(this@MainActivity, android.R.style.Theme_DeviceDefault_Dialog_Alert).setTitle("Delete \"${all[i].first}\"?")
+                    .setPositiveButton("Delete") { _, _ -> Presets.delete(context, all[i].first); keepScroll = scroller?.scrollY ?: -1; recreate() }.setNegativeButton("Cancel", null).show()
+            }) { i -> Presets.apply(context, all[i].second); lookChanged() })
+        addView(space(10))
+        addView(pill("Save current look") { saveLook() }, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)); addView(space(16))
+        addView(sub("ACCENT COLOUR"))
+        addView(segmented(listOf("Red", "From cover"), if (Prefs.accentCover(context)) 1 else 0) {
+            Prefs.setAccentCover(context, it == 1); lookChanged(recreate = false) }); addView(space(8))
+        addView(text("A preset sets every widget's look at once. Long-press your own preset to delete it. \"From cover\" takes the most vivid colour of the album art for the dots, sung words and the visualizer (when its colour is Accent).", 11f, Renderers.DIM))
+    }
+
+    private fun saveLook() {
+        val f = EditText(this).apply { hint = "Name"; setSingleLine(); setTextColor(Renderers.WHITE); setHintTextColor(Renderers.DIM); typeface = mono }
+        val box = LinearLayout(this).apply { setPadding(dp(20), dp(8), dp(20), 0); addView(f, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)) }
+        AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert).setTitle("Save look").setView(box)
+            .setPositiveButton("Save") { _, _ ->
+                val n = f.text.toString().trim().take(16)
+                if (n.isEmpty() || Presets.BUILT_IN.any { it.first.equals(n, true) }) { toast("Pick another name"); return@setPositiveButton }
+                Presets.save(this, n); keepScroll = scroller?.scrollY ?: -1; recreate()
+            }.setNegativeButton("Cancel", null).show()
+    }
+
+    /** a preset, the accent or a restore changed several settings: redraw every widget, rebuild this screen */
+    private fun lookChanged(recreate: Boolean = true) {
+        MediaListenerService.instance?.accentChanged() ?: run {
+            LyricsWidgetProvider.draw(this, AppWidgetManager.getInstance(this).getAppWidgetIds(ComponentName(this, LyricsWidgetProvider::class.java)))
+            ArtWidgetProvider.draw(this, ArtWidgetProvider.ids(this))
+        }
+        widgetsChanged()
+        if (recreate) { keepScroll = scroller?.scrollY ?: -1; recreate() }
+    }
+
+    // ---------- apps ----------
+    private fun appName(pkg: String): String = try {
+        packageManager.getApplicationLabel(packageManager.getApplicationInfo(pkg, 0)).toString()
+    } catch (_: Exception) { pkg }
+
+    private fun fillApps() {
+        appsBox.removeAllViews()
+        val ignored = Prefs.ignoredApps(this)
+        val apps = Prefs.seenApps(this).filter { it != packageName }.map { it to appName(it) }.sortedBy { it.second.lowercase() }
+        if (apps.isEmpty()) { appsBox.addView(text("No media apps seen yet. Play something.", 12f, Renderers.WHITE)); return }
+        apps.forEachIndexed { i, (pkg, name) ->
+            if (i > 0) appsBox.addView(space(10))
+            val on = pkg !in ignored
+            val state = pill(if (on) "Shown" else "Ignored") {
+                val cur = Prefs.ignoredApps(this)
+                Prefs.setIgnoredApps(this, if (pkg in cur) cur - pkg else cur + pkg)
+                fillApps(); MediaListenerService.instance?.reloadAll()
+            }
+            stylePill(state, !on, Renderers.WHITE)
+            appsBox.addView(LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+                addView(LinearLayout(context).apply {
+                    orientation = LinearLayout.VERTICAL
+                    addView(text(name, 14f, if (on) Renderers.WHITE else Renderers.DIM).apply { maxLines = 1; ellipsize = TextUtils.TruncateAt.END })
+                    addView(space(3)); addView(text(pkg, 10f, Renderers.DIM).apply { maxLines = 1; ellipsize = TextUtils.TruncateAt.END })
+                }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+                addView(state, LinearLayout.LayoutParams(dp(112), dp(40)))
+            })
+        }
+    }
+
+    // ---------- translation language ----------
+    private fun langName(code: String) = Translator.LANGS.firstOrNull { it.first == code }?.second
+        ?: java.util.Locale.forLanguageTag(code).getDisplayLanguage(java.util.Locale.forLanguageTag(code)).ifEmpty { code }
+
+    private fun pickLanguage() {
+        val phone = java.util.Locale.getDefault().language
+        val items = listOf("" to "Phone language · ${langName(phone)}") + Translator.LANGS
+        AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert).setTitle("Translate to")
+            .setItems(items.map { it.second }.toTypedArray()) { _, i ->
+                Prefs.setTrLang(this, items[i].first); langPill.text = langName(Prefs.trLang(this)).uppercase()
+                MediaListenerService.instance?.subsChanged()
+            }.setNegativeButton("Cancel", null).show()
+    }
+
+    /** Settings.Secure lock_screen_show_notifications = 0 means no notification reaches the lock screen */
+    private fun lockScreenHidesNotifications(): Boolean = try {
+        Settings.Secure.getInt(contentResolver, "lock_screen_show_notifications", 1) == 0
+    } catch (_: Exception) { false }
+
+    // ---------- quick settings ----------
+    /** Android 13+: one tap asks to add the tile; older: say where to find it */
+    private fun tileButton(card: LinearLayout, cls: Class<*>, name: String) {
+        card.addView(space(10))
+        if (android.os.Build.VERSION.SDK_INT < 33) {
+            card.addView(text("Quick Settings tile \"$name\": edit your tiles to add it.", 11f, Renderers.DIM)); return
+        }
+        card.addView(pill("Add Quick Settings tile") {
+            val sbm = getSystemService(android.app.StatusBarManager::class.java)
+            sbm.requestAddTileService(ComponentName(this, cls), name, android.graphics.drawable.Icon.createWithResource(this, R.drawable.ic_stat), mainExecutor) { r ->
+                when (r) {
+                    android.app.StatusBarManager.TILE_ADD_REQUEST_RESULT_TILE_ADDED -> toast("Tile added")
+                    android.app.StatusBarManager.TILE_ADD_REQUEST_RESULT_TILE_ALREADY_ADDED -> toast("Already in Quick Settings")
+                    android.app.StatusBarManager.TILE_ADD_REQUEST_RESULT_TILE_NOT_ADDED -> {}
+                    else -> toast("Add it by editing your Quick Settings tiles")
+                }
+            }
+        }, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
     }
 
     private fun clearCache() {
@@ -482,6 +728,11 @@ class MainActivity : Activity() {
         trackArtist.text = if (has) parts.getOrElse(1) { "" } else if (!notif) "grant notification access first" else "start music in any app"
         lyrState.text = if (has) s!!.lyricInfo() else "IDLE"
         lyricControls.forEach { it.isEnabled = has; it.alpha = if (has) 1f else .35f }
+        latLabel.text = "LATENCY · " + when (s?.latencySrc) {
+            LatencyStore.Src.ALBUM -> "ALBUM DEFAULT"; LatencyStore.Src.ARTIST -> "ARTIST DEFAULT"
+            LatencyStore.Src.GUESS -> "GUESSED FROM ALBUM"; else -> "THIS SONG"
+        }
+        if (langPill.text.isEmpty()) langPill.text = langName(Prefs.trLang(this)).uppercase()
         val sv = has && s!!.isSaved()
         saveBtn.text = if (sv) "● SAVED" else "SAVE"; stylePill(saveBtn, sv)
         if (!dragging) { val ms = s?.latencyMs ?: 0; latBar.progress = ms / 50 + 100; latValue.text = latText(ms) }

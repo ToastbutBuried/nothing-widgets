@@ -28,6 +28,12 @@ class MediaListenerService : NotificationListenerService() {
     private var curTitle = ""
     private var curArtist = ""
     private var curDur = 0L
+    private var curAlbum = ""
+    /** where the latency in effect comes from (own value, album/artist default, album guess) */
+    var latencySrc = LatencyStore.Src.NONE
+        private set
+    /** translation / romanization per lyric line, aligned with [lines]; null = none */
+    private var subs: List<String>? = null
     @Volatile var latencyMs = 0
         private set
 
@@ -65,6 +71,7 @@ class MediaListenerService : NotificationListenerService() {
     private fun cleanup() {
         instance = null
         main.removeCallbacks(tick)
+        cancelLock()
         try { unregisterReceiver(screenRx) } catch (_: Exception) {}
         try { msm.removeOnActiveSessionsChangedListener(sessionsListener) } catch (_: Exception) {}
         controller?.unregisterCallback(cb); controller = null
@@ -78,7 +85,9 @@ class MediaListenerService : NotificationListenerService() {
 
     /** Prefer the session that is playing; keep the current one when nothing plays. Watch all others for takeover. */
     private fun pick(list: List<MediaController>?) {
-        val all = list ?: emptyList()
+        val ignored = Prefs.ignoredApps(this)
+        list?.forEach { Prefs.addSeenApp(this, it.packageName) }
+        val all = (list ?: emptyList()).filter { it.packageName !in ignored }
         val playing = all.firstOrNull { it.playbackState?.state == PlaybackState.STATE_PLAYING }
         val keep = all.firstOrNull { it.sessionToken == controller?.sessionToken }
         val best = playing ?: keep ?: all.firstOrNull()
@@ -100,6 +109,12 @@ class MediaListenerService : NotificationListenerService() {
 
     // ---- album art (artwork widget) ----
     private var art: android.graphics.Bitmap? = null
+        set(v) {
+            if (v === field) return
+            field = v
+            if (v == null) { Accent.cover = null; return }
+            io.execute { val c = Accent.fromBitmap(v); main.post { if (art === v && Accent.cover != c) { Accent.cover = c; if (Prefs.accentCover(this)) accentChanged() } } }
+        }
     private var artSrc: Any? = null
     /** track the shown cover belongs to (art can come from the cache when the player sends none) */
     private var artFor = ""
@@ -146,14 +161,16 @@ class MediaListenerService : NotificationListenerService() {
         val artist = md?.getString(MediaMetadata.METADATA_KEY_ARTIST) ?: md?.getString(MediaMetadata.METADATA_KEY_ALBUM_ARTIST) ?: ""
         if (title.isEmpty()) {
             if (trackKey.isNotEmpty()) trackVer++
-            trackKey = ""; lines = emptyList(); status = "NO MUSIC"; latencyMs = 0; curTitle = ""; curArtist = ""; curLrc = null; saved = false; return
+            trackKey = ""; lines = emptyList(); subs = null; status = "NO MUSIC"; latencyMs = 0; latencySrc = LatencyStore.Src.NONE
+            curTitle = ""; curArtist = ""; curAlbum = ""; curLrc = null; saved = false; return
         }
         val k = "$title|$artist"
         if (k == trackKey) return
-        trackKey = k; lines = emptyList(); status = "SEARCHING…"; shownIdx = -2; trackVer++
+        trackKey = k; lines = emptyList(); subs = null; status = "SEARCHING…"; shownIdx = -2; trackVer++
         val dur = (md?.getLong(MediaMetadata.METADATA_KEY_DURATION) ?: 0L) / 1000
-        curTitle = title; curArtist = artist; curDur = dur
-        latencyMs = LatencyStore.get(this, k)   // each song keeps its own saved latency
+        curTitle = title; curArtist = artist; curDur = dur; curAlbum = md?.getString(MediaMetadata.METADATA_KEY_ALBUM) ?: ""
+        // own value, else album / artist default, else a guess from other songs of the album
+        LatencyStore.resolve(this, k, artist, curAlbum).let { (ms, src) -> latencyMs = ms; latencySrc = src }
         saved = LrclibClient.isSaved(this, title, artist)
         lrcMem.get(k)?.let { apply(it); return }
         io.execute {
@@ -177,8 +194,25 @@ class MediaListenerService : NotificationListenerService() {
             lines = if (lrc.isNullOrEmpty()) emptyList() else LrcParser.parse(lrc)
             status = if (lrc == null) "OFFLINE" else if (lines.isEmpty()) "NO LYRICS" else null
         }
-        shownIdx = -2; redraw()
+        shownIdx = -2; subs = null; loadSubs(); redraw()
     }
+
+    /** translation / romanization for the current lines (cached per song; off by default) */
+    private fun loadSubs() {
+        val mode = Prefs.trMode(this)
+        if (mode == Translator.OFF || lines.isEmpty()) return
+        val k = trackKey; val ls = lines; val tl = Prefs.trLang(this)
+        io.execute {
+            val r = Translator.fetch(this, k, ls.map { it.s }, mode, tl)
+            main.post { if (trackKey == k && lines === ls) { subs = r; shownIdx = -2; redraw() } }
+        }
+    }
+
+    /** settings changed the translation mode or language */
+    fun subsChanged() { subs = null; loadSubs(); shownIdx = -2; redraw() }
+    /** the cover accent setting changed or the cover colour did: lyrics + art redraw, viz picks it up itself */
+    fun accentChanged() { artSig.clear(); shownIdx = -2; redraw() }
+    fun hasSubs() = subs?.any { it.isNotEmpty() } == true
 
     private fun playing() = controller?.playbackState?.state == PlaybackState.STATE_PLAYING
 
@@ -251,7 +285,30 @@ class MediaListenerService : NotificationListenerService() {
 
     fun choose(c: Candidate) { LrclibClient.saveChoice(this, curTitle, curArtist, c.synced); saved = true; lrcMem.put(trackKey, c.synced); apply(c.synced) }
 
-    fun setLatency(ms: Int) { latencyMs = ms; LatencyStore.set(this, trackKey, ms); shownIdx = -2; redraw() }
+    fun setLatency(ms: Int) {
+        latencyMs = ms; LatencyStore.set(this, trackKey, ms, curArtist, curAlbum)
+        latencySrc = if (ms != 0) LatencyStore.Src.SONG else LatencyStore.resolve(this, trackKey, curArtist, curAlbum).second
+        shownIdx = -2; redraw()
+    }
+    /** makes the current latency the default for the whole album (album = true) or artist; songs with their own value keep it */
+    fun latencyForAll(album: Boolean): Boolean {
+        val key = if (album) LatencyStore.albumKey(curArtist, curAlbum) else LatencyStore.artistKey(curArtist)
+        if (key.isEmpty()) return false
+        LatencyStore.setScope(this, key, latencyMs); return true
+    }
+    fun album() = curAlbum
+
+    /** Imported .lrc/.txt for the current song: saved like a pick. false = empty or no song. */
+    fun importLyrics(text: String): Boolean {
+        if (!hasTrack() || text.isBlank()) return false
+        val t = text.replace("\r\n", "\n").trim()
+        val lrc = if (LrcParser.parse(t).isNotEmpty()) t else LrclibClient.PLAIN + t
+        LrclibClient.saveChoice(this, curTitle, curArtist, lrc); saved = true; lrcMem.put(trackKey, lrc); apply(lrc)
+        return true
+    }
+
+    /** after a backup restore or app filter change: start over from the current sessions */
+    fun reloadAll() { lrcMem.evictAll(); trackKey = ""; artSrc = null; artFor = ""; artSig.clear(); pick(currentSessions()) }
     fun hasTrack() = trackKey.isNotEmpty()
     fun lyricInfo(): String = (if (saved) "SAVED · " else "") + (status?.let { if (it == "PLAIN") "PLAIN · ${lines.size} LINES" else it }
         ?: ("${lines.size} LINES" + if (lines.any { it.words.isNotEmpty() }) " · WORDS" else ""))
@@ -269,8 +326,8 @@ class MediaListenerService : NotificationListenerService() {
     private val overlaySurf = arrayOf(Surface(), Surface())
     fun artFrame(mode: Int, w: Int, h: Int, d: Float): android.graphics.Bitmap {
         val s = overlaySurf[mode.coerceIn(0, 1)]
-        return if (mode == 1) Renderers.lyrics(this, s, w, h, d, lines, position(), status, st = LyricsStyle.from(this, playing()).copy(controls = false, radius = Prefs.artRadius(this).toFloat()))
-        else Renderers.art(this, s, w, h, d, art, curTitle, curArtist, playing(), Prefs.lyrRed(this))
+        return if (mode == 1) Renderers.lyrics(this, s, w, h, d, lines, position(), status, st = LyricsStyle.from(this, playing()).copy(controls = false, radius = Prefs.artRadius(this).toFloat()), subs = subs)
+        else Renderers.art(this, s, w, h, d, art, curTitle, curArtist, playing(), Prefs.lyrRed(this), progress = artProgress(), accent = Accent.current(this))
     }
 
     private var shownIdx = -2
@@ -283,9 +340,12 @@ class MediaListenerService : NotificationListenerService() {
         val ids = mgr.getAppWidgetIds(ComponentName(this, LyricsWidgetProvider::class.java))
         val artIds = ArtWidgetProvider.ids(this)
         val artLyrics = artIds.isNotEmpty() && Prefs.artMode(this) == 1
-        if ((ids.isEmpty() && artIds.isEmpty()) || !screenOn) return
+        val lock = Prefs.lockLyrics(this)
+        if (!lock) cancelLock()
+        if ((ids.isEmpty() && artIds.isEmpty() && !lock) || !screenOn) return
         val pos = position()
         val idx = LrcParser.index(lines, pos)
+        if (lock) updateLock(idx)
         val now = SystemClock.elapsedRealtime()
         if (idx != shownIdx) {
             // animate only the normal forward step; jumps (seek, new track) snap
@@ -300,33 +360,45 @@ class MediaListenerService : NotificationListenerService() {
             // plain lyrics are only spread evenly over the song, so their times mean nothing to seek to
             val seek = st.seek && status == null && lines.isNotEmpty()
             val bmp = Renderers.lyrics(this, surfaces.getOrPut(id) { Surface() }, w, h, d, lines, pos, status, prevIdx, t, st,
-                if (seek) hits else null)
+                if (seek) hits else null, subs)
             if (!seek) hits.clear()
             Renderers.push(this, bmp, intArrayOf(id), R.layout.widget_lyrics) {
                 LyricsWidgetProvider.wire(this, it, st.controls, hits, lines, d, trackKey.hashCode())
             }
         }
         val red = Prefs.lyrRed(this)
+        val accent = Accent.current(this)
+        val prog = artProgress()
+        var coverWake = Long.MAX_VALUE
         for (id in artIds) {
             val (w, h, d) = sizes.getOrPut(id) { Renderers.sizePx(this, id, 160, 160) }
             val surf = surfaces.getOrPut(id) { Surface() }
             val bmp = if (artLyrics) {
                 artSig.remove(id)
-                Renderers.lyrics(this, surf, w, h, d, lines, pos, status, prevIdx, t, st.copy(controls = false, radius = Prefs.artRadius(this).toFloat()))
+                Renderers.lyrics(this, surf, w, h, d, lines, pos, status, prevIdx, t, st.copy(controls = false, radius = Prefs.artRadius(this).toFloat()), subs = subs)
             } else {
-                val sig = "$trackVer|${playing()}|$w|$h|$red"
+                // cover only changes when a progress dot fills: wake for the next one, push nothing in between
+                val n = Renderers.progressDots(w, d)
+                val dot = if (prog >= 0f) (prog * n).toInt() else -1
+                if (prog >= 0f && curDur > 0) coverWake = minOf(coverWake, (((dot + 1) / n.toFloat() - prog) * curDur * 1000).toLong())
+                val sig = "$trackVer|${playing()}|$w|$h|$red|$accent|$dot"
                 if (artSig[id] == sig) continue
                 artSig[id] = sig
-                Renderers.art(this, surf, w, h, d, art, curTitle, curArtist, playing(), red)
+                Renderers.art(this, surf, w, h, d, art, curTitle, curArtist, playing(), red, progress = prog, accent = accent)
             }
             val eq = !artLyrics && playing() && curTitle.isNotEmpty()
             Renderers.push(this, bmp, intArrayOf(id), R.layout.widget_art) { ArtWidgetProvider.wire(this, it, eq) }
         }
         if (!playing()) return
-        if (ids.isEmpty() && !artLyrics) return   // cover mode is static: no ticking
-        if (t < 1f) { main.postDelayed(tick, 40); return }
+        val lyricsShown = ids.isNotEmpty() || artLyrics
+        if (!lyricsShown && !lock) {
+            // cover mode is static apart from its progress dots
+            if (coverWake != Long.MAX_VALUE) main.postDelayed(tick, coverWake.coerceIn(500L, 15_000L))
+            return
+        }
+        if (lyricsShown && t < 1f) { main.postDelayed(tick, 40); return }
         // karaoke lines need a fast tick for the word fill
-        if (lines.getOrNull(idx)?.words?.isNotEmpty() == true) { main.postDelayed(tick, 120); return }
+        if (lyricsShown && lines.getOrNull(idx)?.words?.isNotEmpty() == true) { main.postDelayed(tick, 120); return }
         // otherwise wake exactly at the next line, or once a second for the clock/progress bar
         val speed = (controller?.playbackState?.playbackSpeed ?: 1f).coerceAtLeast(0.1f)
         val nextT = lines.getOrNull(idx + 1)?.t
@@ -334,7 +406,49 @@ class MediaListenerService : NotificationListenerService() {
         main.postDelayed(tick, untilNext.coerceIn(30L, 1000L))
     }
 
+    /** 0..1 through the song for the cover's progress dots; -1 = off / unknown length */
+    private fun artProgress(): Float {
+        if (!Prefs.artProgress(this) || curDur <= 0) return -1f
+        val raw = position() - latencyMs / 1000.0
+        return (raw / curDur).toFloat().coerceIn(0f, 1f)
+    }
+
+    // ---- lock screen line (silent ongoing notification) ----
+    private var lockShown = -3
+    private var lockKey = ""
+    private var lockSubs: List<String>? = null
+
+    private fun updateLock(idx: Int) {
+        if (!playing() || lines.isEmpty() || status != null) { cancelLock(); return }
+        if (idx == lockShown && trackKey == lockKey && subs === lockSubs) return
+        lockShown = idx; lockKey = trackKey; lockSubs = subs
+        val nm = getSystemService(android.app.NotificationManager::class.java)
+        if (nm.getNotificationChannel(LOCK_CH) == null)
+            nm.createNotificationChannel(android.app.NotificationChannel(LOCK_CH, "Lyrics line", android.app.NotificationManager.IMPORTANCE_LOW).apply {
+                description = "The current lyric line, for the lock screen"; setShowBadge(false)
+                lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
+            })
+        val line = lines.getOrNull(idx)?.s?.ifEmpty { "♪" } ?: "♪"
+        val under = subs?.getOrNull(idx)?.takeIf { it.isNotBlank() }?.replace("\n", " · ")
+            ?: lines.getOrNull(idx + 1)?.s?.ifEmpty { "♪" } ?: ""
+        val open = PendingIntent.getActivity(this, 2, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
+        val n = android.app.Notification.Builder(this, LOCK_CH).setSmallIcon(R.drawable.ic_stat)
+            .setContentTitle(line).setContentText(under).setSubText(curTitle)
+            .setOngoing(true).setOnlyAlertOnce(true).setShowWhen(false)
+            .setVisibility(android.app.Notification.VISIBILITY_PUBLIC).setCategory(android.app.Notification.CATEGORY_STATUS)
+            .setContentIntent(open).build()
+        try { nm.notify(LOCK_ID, n) } catch (_: SecurityException) {}   // notification permission missing
+    }
+
+    private fun cancelLock() {
+        if (lockShown == -3) return
+        lockShown = -3; lockSubs = null
+        getSystemService(android.app.NotificationManager::class.java).cancel(LOCK_ID)
+    }
+
     companion object {
+        private const val LOCK_CH = "lyrics_line"
+        private const val LOCK_ID = 42
         private const val ANIM_MS = 380L
         @Volatile var instance: MediaListenerService? = null
         fun nowPlaying(): String = instance?.trackKey?.replace("|", " – ") ?: ""

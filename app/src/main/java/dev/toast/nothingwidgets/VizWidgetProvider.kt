@@ -40,7 +40,7 @@ class VizWidgetProvider : AppWidgetProvider() {
             for (id in mgr.getAppWidgetIds(ComponentName(ctx, VizWidgetProvider::class.java))) {
                 val (w, h, _) = Renderers.sizePx(ctx, id, 110, 110, VisualizerService.CAP_PX)
                 val (cols, rows) = Renderers.grid(Prefs.bands(ctx), w, h)
-                val bmp = Renderers.viz(Surface(), p, w, h, FloatArray(cols), null, cols, rows, Prefs.red(ctx), true, Prefs.bars(ctx))
+                val bmp = Renderers.viz(Surface(), p, w, h, FloatArray(cols), null, cols, rows, VisualizerService.vizColor(ctx), true, Prefs.vizStyle(ctx))
                 Renderers.push(ctx, bmp, intArrayOf(id)) { it.setOnClickPendingIntent(R.id.img, toggleIntent(ctx)) }
             }
         }
